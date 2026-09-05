@@ -26,11 +26,8 @@ use crate::{
 
 const TRANSPARENT_COLOR_INDEX: u8 = 255;
 
-const MOUSE_POINTER_WIDTH: u32 = 12;
-const MOUSE_POINTER_HEIGHT: u32 = 19;
-
-const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 16;
-const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 32;
+const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 9;
+const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 12;
 const MOUSE_RIPPLE_MAX_RADIUS: i32 = 48; // Bounding box padding for mouse updates
 
 /// Cache key identifying a rasterised glyph outline.
@@ -826,8 +823,8 @@ fn rasterize_raw_frame_idx(
                     cx,
                     cy,
                     MOUSE_RIPPLE_CLICK_RADIUS,
-                    [255, 0, 0],
-                    0.5,
+                    [220, 220, 220],
+                    0.18,
                     curr.default_bg,
                 );
             }
@@ -841,43 +838,36 @@ fn rasterize_raw_frame_idx(
                     cx,
                     cy,
                     MOUSE_RIPPLE_DRAG_RADIUS,
-                    [237, 97, 215],
-                    0.5,
+                    [220, 220, 220],
+                    0.18,
                     curr.default_bg,
                 );
             }
             MouseState::Moving => {}
         }
 
-        for dy in 0..MOUSE_POINTER_HEIGHT {
-            for dx in 0..MOUSE_POINTER_WIDTH {
-                let val = CURSOR_BITMAP[(dy * MOUSE_POINTER_WIDTH + dx) as usize];
-                if val == 0 {
-                    continue;
-                }
-                let color = if val == 1 { [255, 255, 255] } else { [0, 0, 0] };
-                for sy in 0..2 {
-                    for sx in 0..2 {
-                        let px = cx + (dx as i32 * 2) + sx;
-                        let py = cy + (dy as i32 * 2) + sy;
-                        if px >= 0
-                            && px < cfg.canvas_w as i32
-                            && py >= 0
-                            && py < cfg.canvas_h as i32
-                        {
-                            blend_pixel_idx(
-                                buf,
-                                prev_buf,
-                                palette,
-                                cfg.canvas_w,
-                                px as u32,
-                                py as u32,
-                                color,
-                                1.0,
-                                curr.default_bg,
-                            );
-                        }
-                    }
+        for dy in crate::pointer::MIN..crate::pointer::HEIGHT {
+            for dx in crate::pointer::MIN..crate::pointer::WIDTH {
+                let (color, alpha) = crate::pointer::pixel(dx, dy);
+                let px = cx + dx;
+                let py = cy + dy;
+                if alpha > 0.0
+                    && px >= 0
+                    && py >= 0
+                    && px < cfg.canvas_w as i32
+                    && py < cfg.canvas_h as i32
+                {
+                    blend_pixel_idx(
+                        buf,
+                        prev_buf,
+                        palette,
+                        cfg.canvas_w,
+                        px as u32,
+                        py as u32,
+                        color,
+                        alpha,
+                        curr.default_bg,
+                    );
                 }
             }
         }
@@ -901,17 +891,6 @@ fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
         ((fg[2] as u16 + bg[2] as u16) / 2) as u8,
     ]
 }
-
-const CURSOR_BITMAP: [u8; MOUSE_POINTER_WIDTH as usize * MOUSE_POINTER_HEIGHT as usize] = [
-    2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1,
-    1, 2, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0,
-    2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 2, 1, 1, 1, 1, 1, 2, 2,
-    2, 2, 2, 0, 2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, 2, 1, 2, 0, 2, 1, 1, 2, 0, 0, 0, 0, 2, 2, 0, 0,
-    2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0,
-];
 
 fn inside_rounded_rect(x: u32, y: u32, cfg: ViewportConfig, radius: i64) -> bool {
     if radius == 0 {
