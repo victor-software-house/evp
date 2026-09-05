@@ -124,6 +124,9 @@ project skill directory. Installation does not alter your agent configuration.
 
 ## Development
 
+Proposed work: [natural click interactions](docs/plans/click-interactions.md)
+(plan only; not implemented in the current release).
+
 See [AGENTS.md](AGENTS.md), [FORK.md](FORK.md) and the upstream
 [architecture](ARCHITECTURE.md). Normal users should install the binary.
 The fork remains experimental; pin a release. A new demo or unreleased branch
