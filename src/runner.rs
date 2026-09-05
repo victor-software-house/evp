@@ -193,8 +193,15 @@ pub(crate) fn resolve_mouse_position(
         let f = elapsed.as_secs_f32() / duration.as_secs_f32();
         let f = f.clamp(0.0, 1.0);
 
+        // Scripted paths arrive already eased: the tape easing was applied when
+        // the sample times were laid out, so each sub-segment spans a fixed
+        // slice of the path between two of those times. Easing again inside the
+        // sub-segment made every one of them slow at its own ends, which shows
+        // up as a sawtooth velocity across a multi-point move. Only a segment
+        // that carries its own easing (a whole gesture captured by `record`)
+        // should be shaped here.
         use easing_function::Easing;
-        let easing = s.easing.unwrap_or(StandardEasing::InOutCubic);
+        let easing = s.easing.unwrap_or(StandardEasing::Linear);
         let f_eased = easing.ease(f);
 
         let col = s.start_col + f_eased * (s.end_col - s.start_col);
@@ -1170,6 +1177,51 @@ fn generate_spline_points_f32(coords: &[(u16, u16)]) -> Vec<(f32, f32)> {
     let final_pt = (coords[m - 1].0 as f32, coords[m - 1].1 as f32);
     out.push(final_pt);
 
+    resample_by_arc_length(&out)
+}
+
+/// Respace a dense polyline so successive points are equally far apart along
+/// the path.
+///
+/// The Catmull-Rom spans above are parameterised by `u`, not by arc length. With
+/// the end control points duplicated, a straight two-point move reduces to
+/// `p1 + (p2 - p1) * (0.5u + 1.5u^2 - u^3)`, whose derivative runs 0.5 -> 1.25
+/// -> 0.5. Sampling `u` uniformly therefore made every span crawl at its ends
+/// and rush through its middle, a 2.5x swing that reads as a sawtooth in the
+/// rendered pointer speed and gets worse the faster the move is.
+fn resample_by_arc_length(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut cumulative = Vec::with_capacity(points.len());
+    let mut total = 0.0f32;
+    cumulative.push(0.0);
+    for w in points.windows(2) {
+        total += (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+        cumulative.push(total);
+    }
+    if total <= f32::EPSILON {
+        return points.to_vec();
+    }
+
+    let last = points.len() - 1;
+    let mut out = Vec::with_capacity(points.len());
+    let mut cursor = 0usize;
+    for j in 0..=last {
+        let target = total * (j as f32 / last as f32);
+        while cursor + 1 < last && cumulative[cursor + 1] < target {
+            cursor += 1;
+        }
+        let span = cumulative[cursor + 1] - cumulative[cursor];
+        let f = if span <= f32::EPSILON {
+            0.0
+        } else {
+            ((target - cumulative[cursor]) / span).clamp(0.0, 1.0)
+        };
+        let (ax, ay) = points[cursor];
+        let (bx, by) = points[cursor + 1];
+        out.push((ax + f * (bx - ax), ay + f * (by - ay)));
+    }
     out
 }
 
@@ -2055,6 +2107,29 @@ mod tests {
 
     use libghostty_vt::{Terminal, TerminalOptions};
     use tracing_subscriber::fmt::MakeWriter;
+
+    #[test]
+    fn spline_points_are_evenly_spaced_along_the_path() {
+        for coords in [
+            vec![(3u16, 15u16), (19, 11)],
+            vec![(3u16, 15u16), (11, 16), (23, 15), (35, 12)],
+        ] {
+            let points = super::generate_spline_points_f32(&coords);
+            let gaps: Vec<f32> = points
+                .windows(2)
+                .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+                .filter(|g| *g > f32::EPSILON)
+                .collect();
+            let min = gaps.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = gaps.iter().copied().fold(0.0f32, f32::max);
+            // Uniform `u` sampling of these spans varies 2.5x end to middle.
+            assert!(
+                max / min < 1.05,
+                "spacing varies {:.2}x for {coords:?}",
+                max / min
+            );
+        }
+    }
 
     use crate::script::{Event, KeySpec, ModSet, NamedKey, Settings};
 

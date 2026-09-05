@@ -9,6 +9,14 @@ This fork changes presentation only:
 - Neutral click/drag feedback instead of saturated circles.
 - Arrow compresses to 82% while pressed and returns to full size on release;
   the hotspot stays fixed in both raster and SVG output.
+- Scripted pointer paths hold the speed their tape asks for: spline spans are
+  respaced by arc length before the sample times are laid out, and a segment
+  without its own easing interpolates linearly. Upstream sampled each
+  Catmull-Rom span by curve parameter, which with duplicated end control points
+  reduces a straight two-point move to 0.5u + 1.5u^2 - u^3 and swings its speed
+  2.5x between the span ends and its middle. Across a multi-point move that
+  reads as a sawtooth, and the faster the move the worse it looks.
+  Gestures captured by `record` set their easing explicitly and are unaffected.
 - Input coordinates, modifier dispatch and terminal recording remain unchanged.
 
 `src/pointer.rs` owns the geometry and raster coverage. The existing raster
