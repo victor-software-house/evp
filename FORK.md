@@ -6,7 +6,9 @@ This fork changes presentation only:
 
 - Original macOS-style black arrow with a fine white outline; no Apple assets.
 - Shared geometry for SVG and antialiased GIF/PNG output.
-- Small neutral click/drag feedback instead of saturated circles.
+- Neutral click/drag feedback instead of saturated circles.
+- Arrow compresses to 82% while pressed and returns to full size on release;
+  the hotspot stays fixed in both raster and SVG output.
 - Input coordinates, modifier dispatch and terminal recording remain unchanged.
 
 `src/pointer.rs` owns the geometry and raster coverage. The existing raster

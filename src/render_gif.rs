@@ -26,7 +26,7 @@ use crate::{
 
 const TRANSPARENT_COLOR_INDEX: u8 = 255;
 
-const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 9;
+const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 12;
 const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 12;
 const MOUSE_RIPPLE_MAX_RADIUS: i32 = 48; // Bounding box padding for mouse updates
 
@@ -824,7 +824,7 @@ fn rasterize_raw_frame_idx(
                     cy,
                     MOUSE_RIPPLE_CLICK_RADIUS,
                     [220, 220, 220],
-                    0.18,
+                    0.32,
                     curr.default_bg,
                 );
             }
@@ -848,7 +848,11 @@ fn rasterize_raw_frame_idx(
 
         for dy in crate::pointer::MIN..crate::pointer::HEIGHT {
             for dx in crate::pointer::MIN..crate::pointer::WIDTH {
-                let (color, alpha) = crate::pointer::pixel(dx, dy);
+                let (color, alpha) = if m_state == MouseState::Clicking {
+                    crate::pointer::scaled_pixel(dx, dy, 0.82)
+                } else {
+                    crate::pointer::pixel(dx, dy)
+                };
                 let px = cx + dx;
                 let py = cy + dy;
                 if alpha > 0.0

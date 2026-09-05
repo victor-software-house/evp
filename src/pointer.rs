@@ -50,13 +50,17 @@ fn sample(x: f32, y: f32) -> Option<f32> {
 
 /// Four-by-four coverage sampling avoids the previous doubled bitmap's jagged edges.
 pub(crate) fn pixel(x: i32, y: i32) -> ([u8; 3], f32) {
+    scaled_pixel(x, y, 1.0)
+}
+
+pub(crate) fn scaled_pixel(x: i32, y: i32, scale: f32) -> ([u8; 3], f32) {
     let mut count = 0;
     let mut value = 0.0;
     for sy in 0..4 {
         for sx in 0..4 {
             if let Some(v) = sample(
-                x as f32 + (sx as f32 + 0.5) / 4.0,
-                y as f32 + (sy as f32 + 0.5) / 4.0,
+                (x as f32 + (sx as f32 + 0.5) / 4.0) / scale,
+                (y as f32 + (sy as f32 + 0.5) / 4.0) / scale,
             ) {
                 value += v;
                 count += 1;
@@ -75,6 +79,16 @@ pub(crate) fn pixel(x: i32, y: i32) -> ([u8; 3], f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pressed_pointer_is_smaller() {
+        let coverage = |scale| {
+            (MIN..HEIGHT)
+                .flat_map(|y| (MIN..WIDTH).map(move |x| scaled_pixel(x, y, scale).1))
+                .sum::<f32>()
+        };
+        assert!(coverage(0.82) < coverage(1.0) * 0.75);
+    }
+
     #[test]
     fn pointer_has_dark_body_white_outline_and_transparent_exterior() {
         assert_eq!(pixel(3, 10), ([17; 3], 1.0));
