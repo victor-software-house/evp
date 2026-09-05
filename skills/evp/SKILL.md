@@ -76,8 +76,8 @@ long holds. With ImageMagick installed, inspect delays using
 
 - Omit font settings to use bundled fonts. `Set Font` is invalid in v0.19.0;
   `FontFamily` expects a usable font file, not a reliably resolved family name.
-- `print-ref-script` inherits stale upstream examples; the bundled quickstart
-  is the tested starting point.
+- `print-ref-script` includes a commented quickstart and upstream's test tape;
+  use the bundled `examples/quickstart.tape` for a minimal runnable start.
 - Preserve history and typed input. Never fake a prompt or send hidden Enter
   merely to improve presentation. Fix ordering in the application if needed.
 - Test full-screen/alternate-buffer apps and modifier-click dispatch explicitly.

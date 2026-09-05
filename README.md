@@ -39,6 +39,7 @@ For manual installation, download the archive and its `.sha256` from
 
 Create `hello.tape`:
 
+<!-- START_REF_SCRIPT -->
 ```text
 Output hello.gif
 Output hello.svg
@@ -56,6 +57,7 @@ Enter
 Sleep 1s
 Screenshot hello.png
 ```
+<!-- END_REF_SCRIPT -->
 
 Then:
 
@@ -109,8 +111,8 @@ in a browser; do not infer its smoothness solely from `Set Framerate`.
 - `Wait+Screen@10s /ready/` waits for rendered text. Prefer it to guessed startup sleeps.
 - `Screenshot frame.png` captures a real rendered frame. SVG and JSON are also supported.
 - `evp --help` and `evp record --help` describe CLI flags.
-- Upstream `print-ref-script` includes stale font guidance. Use the tested
-  quickstart here rather than blindly running that reference.
+- `print-ref-script` prints a commented quickstart plus upstream's test tape.
+  The bundled `examples/quickstart.tape` is the minimal runnable starting point.
 
 ## Agent skill
 
