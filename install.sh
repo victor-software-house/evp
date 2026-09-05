@@ -1,218 +1,35 @@
 #!/bin/sh
-# evp installer — downloads a prebuilt evp binary from the latest GitHub
-# release.
-#
-# Usage:
-#   curl -sSfL https://github.com/HalFrgrd/evp/releases/latest/download/install.sh | sh
-#
-# Override the version (default `latest`):
-#   curl -sSfL .../install.sh | EVP_VERSION=v0.2.0 sh
-#
-# Override the default install dir:
-#   curl -sSfL .../install.sh | EVP_INSTALL_DIR=~/.local/bin sh
-
+# Install a checksummed fork binary plus its documentation and skill.
 set -eu
-
-expand_path() {
-    case "$1" in
-        '~/'*) echo "${HOME}/${1#~/}" ;;
-        '~')   echo "${HOME}" ;;
-        *)     echo "$1" ;;
-    esac
-}
-
-REPO="HalFrgrd/evp"
-find_writable_path_dir() {
-    (
-        IFS=':'
-        for dir in $PATH; do
-            dir="${dir%/}"
-            if [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ]; then
-                case "$dir" in
-                    /bin|/sbin|/usr/bin|/usr/sbin|/lib*|/opt|/usr/lib*)
-                        continue
-                        ;;
-                    *)
-                        echo "$dir"
-                        exit 0
-                        ;;
-                esac
-            fi
-        done
-        exit 1
-    )
-}
-
-is_in_path() {
-    (
-        IFS=':'
-        for dir in $PATH; do
-            dir_abs="$(cd "$dir" 2>/dev/null && pwd || true)"
-            if [ -n "$dir_abs" ] && [ "$dir_abs" = "$1" ]; then
-                exit 0
-            fi
-        done
-        exit 1
-    )
-}
-
-if [ -n "${EVP_INSTALL_DIR:-}" ]; then
-    INSTALL_DIR="$(expand_path "$EVP_INSTALL_DIR")"
-else
-    if W_DIR="$(find_writable_path_dir)"; then
-        INSTALL_DIR="$W_DIR"
-    else
-        if [ -w "/usr/local/bin" ]; then
-            INSTALL_DIR="/usr/local/bin"
-        else
-            INSTALL_DIR="${HOME}/.local/bin"
-        fi
-    fi
+REPO=victor-software-house/evp
+TAG=${EVP_VERSION:-pointer-v0.19.0-1}
+BIN=${EVP_INSTALL_DIR:-"$HOME/.local/bin"}
+case "$TAG" in *[!a-zA-Z0-9._-]*|'') printf '%s\n' 'Invalid EVP_VERSION' >&2; exit 1;; esac
+if [ "$(uname -s)-$(uname -m)" != Darwin-arm64 ]; then
+    printf '%s\n' 'This fork release supports Apple Silicon macOS only.' >&2
+    exit 1
 fi
-VERSION_OVERRIDE="${EVP_VERSION:-}"
-
-say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
-err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
-
-download() {
-    url="$1"; dest="$2"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$dest" "$url"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$dest" "$url"
-    else
-        err "Neither curl nor wget is available."
-    fi
-}
-
-get_latest_version() {
-    url="https://github.com/${REPO}/releases/latest"
-    if command -v curl >/dev/null 2>&1; then
-        tag_url="$(curl -sI "$url" | grep -i '^location:' | head -1)"
-    elif command -v wget >/dev/null 2>&1; then
-        tag_url="$(wget --max-redirect=0 --server-response -O /dev/null "$url" 2>&1 | grep -i 'location:' | head -1)"
-    else
-        err "Neither curl nor wget is available. Please install one and retry."
-    fi
-    version="$(printf '%s' "$tag_url" | sed 's|.*/||' | cut -d' ' -f1 | tr -d '\r\n')"
-    [ -n "$version" ] || err "Could not determine latest version from GitHub Release redirect."
-    echo "$version"
-}
-
-verify_sha256() {
-    sha256_file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -c "$sha256_file"
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -c "$sha256_file"
-    else
-        err "No checksum tool found (sha256sum or shasum). Cannot verify download."
-    fi
-}
-
-# --- Platform detection ----------------------------------------------------
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-
-case "$OS" in
-    Linux) os_tag="unknown-linux-musl" ;;
-    Darwin) os_tag="apple-darwin" ;;
-    FreeBSD) os_tag="unknown-freebsd" ;;
-    *)
-        err "Unsupported OS: $OS. Only Linux, macOS, and FreeBSD prebuilt binaries are published today.
-Build from source instead: https://github.com/${REPO}#build-from-source"
-        ;;
-esac
-
-case "$ARCH" in
-    x86_64|amd64) arch_tag="x86_64" ;;
-    arm64|aarch64) arch_tag="aarch64" ;;
-    *)
-        err "Unsupported architecture: $ARCH. Only x86_64 and aarch64 prebuilt binaries are published today.
-Build from source instead: https://github.com/${REPO}#build-from-source"
-        ;;
-esac
-
-# Validate supported combinations
-case "${arch_tag}-${os_tag}" in
-    x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-freebsd)
-        ;;
-    *)
-        err "Unsupported target platform: ${arch_tag}-${os_tag}.
-Build from source instead: https://github.com/${REPO}#build-from-source"
-        ;;
-esac
-
-TARGET="${arch_tag}-${os_tag}"
-say "Detected target: ${TARGET}"
-
-# --- Resolve release tag ---------------------------------------------------
-
-if [ -n "$VERSION_OVERRIDE" ]; then
-    TAG="$VERSION_OVERRIDE"
-    say "Using specified release version: ${TAG}"
-else
-    say "Fetching latest release info from github.com/${REPO}..."
-    TAG="$(get_latest_version)"
-    say "Latest version: ${TAG}"
-fi
-
-VERSION_NO_V="${TAG#v}"
-STAGE="evp-${VERSION_NO_V}-${TARGET}"
-ARCHIVE="${STAGE}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE}"
-SHA_URL="${URL}.sha256"
-
-
-
-# --- Download + verify -----------------------------------------------------
-
-TMPDIR="$(mktemp -d)"
-# shellcheck disable=SC2064
-trap "rm -rf '$TMPDIR'" EXIT
-
-say "Downloading ${ARCHIVE}..."
-download "$URL" "${TMPDIR}/${ARCHIVE}"
-
-if download "$SHA_URL" "${TMPDIR}/${ARCHIVE}.sha256" 2>/dev/null; then
-    say "Verifying checksum..."
-    (cd "$TMPDIR" && verify_sha256 "${ARCHIVE}.sha256") \
-        || err "Checksum verification failed."
-else
-    warn "No .sha256 published for ${TAG}; skipping verification."
-fi
-
-# --- Extract + install -----------------------------------------------------
-
-tar -xzf "${TMPDIR}/${ARCHIVE}" -C "${TMPDIR}"
-mkdir -p "$INSTALL_DIR"
-install -m 755 "${TMPDIR}/${STAGE}/evp" "${INSTALL_DIR}/evp"
-
-ABS_INSTALL_DIR=$(cd "$INSTALL_DIR" && pwd)
-ABS_PWD=$(pwd)
-
-if is_in_path "$ABS_INSTALL_DIR"; then
-    RUN_CMD="evp"
-elif [ "$ABS_INSTALL_DIR" = "$ABS_PWD" ]; then
-    RUN_CMD="./evp"
-else
-    RUN_CMD="${INSTALL_DIR}/evp"
-fi
-
-say "Installed: ${INSTALL_DIR}/evp"
-"${INSTALL_DIR}/evp" --version | head -n1
-
-cat <<EOF
-
-Try it out:
-
-    ${RUN_CMD} print-ref-script > demo.tape && ${RUN_CMD} demo.tape
-    # → writes ./evp-test.gif (a small built-in demo)
-
-Or record your own terminal session:
-
-    ${RUN_CMD} record --output demo.tape
-
-EOF
+for tool in curl tar shasum; do
+    command -v "$tool" >/dev/null 2>&1 || { printf 'Required tool missing: %s\n' "$tool" >&2; exit 1; }
+done
+STAGE="evp-$TAG-aarch64-apple-darwin"
+ARCHIVE="$STAGE.tar.gz"
+URL="https://github.com/$REPO/releases/download/$TAG"
+TEMP=$(mktemp -d)
+trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+curl -fLsS "$URL/$ARCHIVE" -o "$TEMP/$ARCHIVE"
+curl -fLsS "$URL/$ARCHIVE.sha256" -o "$TEMP/$ARCHIVE.sha256"
+(cd "$TEMP" && shasum -a 256 -c "$ARCHIVE.sha256")
+tar -xzf "$TEMP/$ARCHIVE" -C "$TEMP"
+ROOT="$TEMP/$STAGE"
+test -f "$ROOT/evp"
+test -f "$ROOT/skills/evp/SKILL.md"
+mkdir -p "$BIN"
+BIN=$(cd "$BIN" && pwd)
+SHARE="$BIN/../share/evp"
+mkdir -p "$SHARE"
+install -m 755 "$ROOT/evp" "$BIN/evp"
+cp "$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT/FORK.md" "$ROOT/ARCHITECTURE.md" "$ROOT/LICENSE" "$SHARE/"
+cp -R "$ROOT/skills" "$ROOT/examples" "$ROOT/licenses" "$SHARE/"
+"$BIN/evp" --version
+printf '\nBinary: %s/evp\nDocs and skill: %s\nAdd the binary directory to PATH if needed.\n' "$BIN" "$SHARE"
