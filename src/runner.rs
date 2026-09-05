@@ -925,16 +925,12 @@ pub(crate) fn build_timeline(
                     };
                     let start_cursor = cursor;
 
-                    use easing_function::Easing;
-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
-
-                    let mut times = Vec::with_capacity(points.len());
-                    for j in 0..points.len() {
-                        let f = j as f32 / (points.len() - 1) as f32;
-                        let f_eased = ease_func.ease(f);
-                        let t_offset = total_dur.mul_f32(f_eased);
-                        times.push(start_cursor + t_offset);
-                    }
+                    let (points, times) = timed_mouse_path(
+                        &points,
+                        start_cursor,
+                        total_dur,
+                        easing.unwrap_or(StandardEasing::InOutCubic),
+                    );
 
                     let (x0, y0) = points[0];
                     let col0 = x0.round() as u16;
@@ -962,7 +958,7 @@ pub(crate) fn build_timeline(
                             end_col: ex,
                             end_row: ey,
                             state: crate::recording::MouseState::Dragging,
-                            easing: None,
+                            easing: Some(StandardEasing::Linear),
                         });
                     }
 
@@ -1039,16 +1035,12 @@ pub(crate) fn build_timeline(
                     };
                     let start_cursor = cursor;
 
-                    use easing_function::Easing;
-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
-
-                    let mut times = Vec::with_capacity(points.len());
-                    for j in 0..points.len() {
-                        let f = j as f32 / (points.len() - 1) as f32;
-                        let f_eased = ease_func.ease(f);
-                        let t_offset = total_dur.mul_f32(f_eased);
-                        times.push(start_cursor + t_offset);
-                    }
+                    let (points, times) = timed_mouse_path(
+                        &points,
+                        start_cursor,
+                        total_dur,
+                        easing.unwrap_or(StandardEasing::InOutCubic),
+                    );
 
                     let (x0, y0) = points[0];
                     let col0 = x0.round() as u16;
@@ -1076,7 +1068,7 @@ pub(crate) fn build_timeline(
                             end_col: ex,
                             end_row: ey,
                             state: crate::recording::MouseState::Moving,
-                            easing: None,
+                            easing: Some(StandardEasing::Linear),
                         });
                     }
 
@@ -1116,6 +1108,65 @@ pub(crate) fn build_timeline(
         }
     }
     (out, mouse_segments, cursor)
+}
+
+/// Sample distance along the spline at uniformly increasing times. Easing maps
+/// elapsed time to position, never distance to a potentially negative timestamp.
+fn timed_mouse_path(
+    path: &[(f32, f32)],
+    start: Duration,
+    duration: Duration,
+    easing: StandardEasing,
+) -> (Vec<(f32, f32)>, Vec<Duration>) {
+    use easing_function::Easing;
+    let mut distances = vec![0.0];
+    for pair in path.windows(2) {
+        distances.push(
+            distances.last().copied().unwrap_or(0.0)
+                + (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1),
+        );
+    }
+    let total = *distances.last().unwrap();
+    // Callers supply a nonempty spline. A stationary/instant path needs only endpoints.
+    let count = if duration.is_zero() || total == 0.0 {
+        2
+    } else {
+        path.len().max(2)
+    };
+    let mut points = Vec::with_capacity(count);
+    let mut times = Vec::with_capacity(count);
+    for i in 0..count {
+        let t = i as f32 / (count - 1) as f32;
+        times.push(
+            start
+                + if i == count - 1 {
+                    duration
+                } else {
+                    duration.mul_f32(t)
+                },
+        );
+        if i == 0 || total == 0.0 {
+            points.push(path[0]);
+        } else if i == count - 1 {
+            points.push(*path.last().unwrap());
+        } else {
+            // Back/elastic curves may leave [0,1]; the defined path ends there.
+            // Clamp position rather than extrapolate outside its endpoints.
+            let distance = easing.ease(t).clamp(0.0, 1.0) * total;
+            let end = distances
+                .partition_point(|d| *d <= distance)
+                .min(path.len() - 1);
+            if end == 0 || distances[end] == distances[end - 1] {
+                points.push(path[end]);
+            } else {
+                let f = (distance - distances[end - 1]) / (distances[end] - distances[end - 1]);
+                let (ax, ay) = path[end - 1];
+                let (bx, by) = path[end];
+                points.push((ax + (bx - ax) * f, ay + (by - ay) * f));
+            }
+        }
+    }
+    (points, times)
 }
 
 fn generate_spline_points_f32(coords: &[(u16, u16)]) -> Vec<(f32, f32)> {
@@ -2040,6 +2091,101 @@ impl TerminalStateTracker {
                     );
                 }
                 self.prev_cursor_visible = Some(visible);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    #[test]
+    fn easing_controls_position_over_time_for_move_and_drag() {
+        for verb in ["MouseMove", "MouseDrag"] {
+            let script = crate::script::parse(&format!(
+                "Output demo.gif\n{verb}@1s@EaseInOutCubic 10 10 90 10\n"
+            ))
+            .unwrap();
+            let (events, segments, _) = build_timeline(&script.events, &script.settings);
+            for (ms, expected) in [
+                (0, 10.0),
+                (250, 15.0),
+                (500, 50.0),
+                (750, 85.0),
+                (1000, 90.0),
+            ] {
+                let (x, y, _) =
+                    resolve_mouse_position(Duration::from_millis(ms), &segments).unwrap();
+                assert!(
+                    (x - expected).abs() < 0.1,
+                    "{verb} at {ms}ms: {x} != {expected}"
+                );
+                assert!((y - 10.0).abs() < 0.01);
+            }
+            assert!(events.windows(2).all(|w| w[0].at <= w[1].at));
+            for event in &events {
+                if let Event::MouseInput {
+                    action: crate::script::MouseAction::Motion,
+                    col,
+                    row,
+                    ..
+                } = event.event
+                {
+                    let (x, y, _) = resolve_mouse_position(event.at, &segments).unwrap();
+                    assert!((x - col as f32).abs() <= 0.51);
+                    assert!((y - row as f32).abs() <= 0.51);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn instant_motion_reaches_endpoint_without_nan() {
+        for verb in ["MouseMove", "MouseDrag"] {
+            let script =
+                crate::script::parse(&format!("Output demo.gif\n{verb}@0ms 10 10 90 20\n"))
+                    .unwrap();
+            let (events, segments, end) = build_timeline(&script.events, &script.settings);
+            assert_eq!(end, Duration::ZERO);
+            assert!(events.iter().all(|e| e.at == Duration::ZERO));
+            let (x, y, _) = resolve_mouse_position(Duration::ZERO, &segments).unwrap();
+            assert_eq!((x, y), (90.0, 20.0));
+        }
+    }
+
+    #[test]
+    fn linear_motion_has_even_distance_and_exact_duration() {
+        let script =
+            crate::script::parse("Output demo.gif\nMouseMove@1s@Linear 10 10 90 10\n").unwrap();
+        let (_, segments, end) = build_timeline(&script.events, &script.settings);
+        assert_eq!(end, Duration::from_secs(1));
+        for ms in (0..=1000).step_by(20) {
+            let (x, _, _) = resolve_mouse_position(Duration::from_millis(ms), &segments).unwrap();
+            let expected = 10.0 + 80.0 * ms as f32 / 1000.0;
+            assert!((x - expected).abs() < 0.1, "{ms}ms: {x} != {expected}");
+        }
+    }
+
+    #[test]
+    fn overshooting_easing_and_repeated_points_keep_time_ordered() {
+        for verb in ["MouseMove", "MouseDrag"] {
+            for easing in ["EaseInBack", "EaseOutElastic", "EaseInOutBounce"] {
+                for coords in ["10 10 90 10", "10 10 10 10", "10 10 10 10 40 30 60 10"] {
+                    let script = crate::script::parse(&format!(
+                        "Output demo.gif\n{verb}@1s@{easing} {coords}\n"
+                    ))
+                    .unwrap();
+                    let (events, segments, end) = build_timeline(&script.events, &script.settings);
+                    assert!(events.windows(2).all(|w| w[0].at <= w[1].at));
+                    assert!(segments.iter().all(|s| s.start_time <= s.end_time));
+                    assert!(end >= Duration::from_secs(1));
+                    for ms in (0..=1000).step_by(20) {
+                        let (x, y, _) =
+                            resolve_mouse_position(Duration::from_millis(ms), &segments).unwrap();
+                        assert!(x.is_finite() && y.is_finite());
+                    }
+                }
             }
         }
     }

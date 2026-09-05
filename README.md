@@ -102,6 +102,18 @@ GIF timing uses hundredths of a second. 50 fps maps to 20 ms motion frames.
 Static frames may be combined into longer holds. Check the exported animation
 in a browser; do not infer its smoothness solely from `Set Framerate`.
 
+## Native easing correction (after pointer-v0.19.0-1)
+
+MouseMove and MouseDrag now apply easing to **distance over elapsed time**.
+`EaseInOutCubic` starts slowly, accelerates, then settles; `Linear` maintains
+constant speed along the spline. Rendered and dispatched positions use the same
+samples. Back/elastic progress stays within the path endpoints rather than
+creating negative or out-of-order timestamps.
+
+This intentionally corrects upstream's inverted timing. Existing tapes still
+parse, but nonlinear motion looks different. Retune tapes that compensated with
+multiple hand-timed legs. The pinned binary above predates this correction.
+
 ## Themes, fonts and synchronization
 
 - `evp themes` lists presets. `Set Theme { "background": "#232136", "foreground": "#e0def4" }` accepts custom colors.

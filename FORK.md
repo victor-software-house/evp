@@ -9,7 +9,14 @@ This fork changes presentation only:
 - Neutral click/drag feedback instead of saturated circles.
 - Arrow compresses to 82% while pressed and returns to full size on release;
   the hotspot stays fixed in both raster and SVG output.
-- Input coordinates, modifier dispatch and terminal recording remain unchanged.
+- MouseMove and MouseDrag apply easing to distance along the spline over elapsed
+  time, not to event timestamps. Linear means constant path speed. Intermediate
+  rendering uses linear interpolation rather than applying easing a second time.
+- Back/elastic progress is clamped to the path endpoints; timestamps remain
+  ordered. Stationary paths and zero-duration movement retain exact endpoints.
+- Tape syntax, modifiers and configured durations are unchanged. Nonlinear motion
+  intentionally differs from upstream's inverted easing. This correction is not
+  included in the earlier pointer-v0.19.0-1 binary.
 
 `src/pointer.rs` owns the geometry and raster coverage. The existing raster
 and SVG renderers consume it. There are no new dependencies or tape settings.

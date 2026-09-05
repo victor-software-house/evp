@@ -67,6 +67,12 @@ This fork compresses the arrow while pressed and adds neutral click feedback.
 Treat these durations as a starting point; inspect actual motion. Avoid long
 cinematic easing for ordinary clicks.
 
+The native easing correction after pointer-v0.19.0-1 makes EaseInOutCubic map
+time to path distance: slow start/end, faster middle. Linear is constant-speed.
+Use one eased movement instead of hand-timed linear legs on corrected builds.
+Back/elastic progress is bounded by path endpoints. Check the recorder revision:
+the first pointer binary predates this correction.
+
 For GIF, 50 fps gives an exact 20 ms cadence. Still frames can be coalesced;
 verify distinct movement frames and playback, not the average frame count over
 long holds. With ImageMagick installed, inspect delays using
