@@ -2,9 +2,10 @@
 
 use easing_function::Easing;
 use easing_function::easings::StandardEasing;
+use serde::{Deserialize, Serialize};
 
 /// How a move's covered share of its path grows with elapsed time.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MouseEasing {
     Standard(StandardEasing),
     /// A hand's pointing stroke: a fast launch that peaks a quarter of the way
