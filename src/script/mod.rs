@@ -27,13 +27,19 @@ pub fn write_reference_header() -> String {
     header
 }
 
-fn format_mouse_cmd(name: &str, delay: Duration, easing: Option<StandardEasing>) -> String {
+fn format_mouse_cmd(
+    name: &str,
+    delay: Duration,
+    easing: Option<crate::hand::MouseEasing>,
+) -> String {
     let mut cmd = name.to_string();
     let has_delay = delay != Duration::from_millis(50);
     if has_delay {
         cmd.push_str(&format!("@{}ms", delay.as_millis()));
     }
-    if let Some(e) = easing {
+    if let Some(crate::hand::MouseEasing::Hand) = easing {
+        cmd.push_str("@Hand");
+    } else if let Some(crate::hand::MouseEasing::Standard(e)) = easing {
         let easing_name = match e {
             StandardEasing::Linear => "Linear",
             StandardEasing::InSine => "EaseInSine",

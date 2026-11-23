@@ -15,7 +15,6 @@
 //! (event or frame) using `poll(2)` on the PTY fd so any incoming output
 //! also wakes us early.
 
-use easing_function::easings::StandardEasing;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -170,7 +169,7 @@ pub struct MouseSegment {
     pub end_col: f32,
     pub end_row: f32,
     pub state: crate::recording::MouseState,
-    pub easing: Option<StandardEasing>,
+    pub easing: Option<crate::hand::MouseEasing>,
 }
 
 pub(crate) fn resolve_mouse_position(
@@ -193,9 +192,7 @@ pub(crate) fn resolve_mouse_position(
         let f = elapsed.as_secs_f32() / duration.as_secs_f32();
         let f = f.clamp(0.0, 1.0);
 
-        use easing_function::Easing;
-        let easing = s.easing.unwrap_or(StandardEasing::InOutCubic);
-        let f_eased = easing.ease(f);
+        let f_eased = s.easing.unwrap_or_default().ease(f);
 
         let col = s.start_col + f_eased * (s.end_col - s.start_col);
         let row = s.start_row + f_eased * (s.end_row - s.start_row);
@@ -925,16 +922,19 @@ pub(crate) fn build_timeline(
                     };
                     let start_cursor = cursor;
 
-                    use easing_function::Easing;
-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
-
-                    let mut times = Vec::with_capacity(points.len());
-                    for j in 0..points.len() {
-                        let f = j as f32 / (points.len() - 1) as f32;
-                        let f_eased = ease_func.ease(f);
-                        let t_offset = total_dur.mul_f32(f_eased);
-                        times.push(start_cursor + t_offset);
-                    }
+                    // Sample even times; the easing gives the share of the
+                    // path covered at each, so position follows the curve.
+                    let timed = crate::hand::timed_path(
+                        &points,
+                        easing.unwrap_or_default(),
+                        total_dur.as_secs_f32() * 1000.0,
+                        5.0,
+                    );
+                    let points: Vec<(f32, f32)> = timed.iter().map(|(_, p)| *p).collect();
+                    let times: Vec<Duration> = timed
+                        .iter()
+                        .map(|(ms, _)| start_cursor + Duration::from_secs_f32(ms / 1000.0))
+                        .collect();
 
                     let (x0, y0) = points[0];
                     let col0 = x0.round() as u16;
@@ -1039,16 +1039,19 @@ pub(crate) fn build_timeline(
                     };
                     let start_cursor = cursor;
 
-                    use easing_function::Easing;
-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
-
-                    let mut times = Vec::with_capacity(points.len());
-                    for j in 0..points.len() {
-                        let f = j as f32 / (points.len() - 1) as f32;
-                        let f_eased = ease_func.ease(f);
-                        let t_offset = total_dur.mul_f32(f_eased);
-                        times.push(start_cursor + t_offset);
-                    }
+                    // Sample even times; the easing gives the share of the
+                    // path covered at each, so position follows the curve.
+                    let timed = crate::hand::timed_path(
+                        &points,
+                        easing.unwrap_or_default(),
+                        total_dur.as_secs_f32() * 1000.0,
+                        5.0,
+                    );
+                    let points: Vec<(f32, f32)> = timed.iter().map(|(_, p)| *p).collect();
+                    let times: Vec<Duration> = timed
+                        .iter()
+                        .map(|(ms, _)| start_cursor + Duration::from_secs_f32(ms / 1000.0))
+                        .collect();
 
                     let (x0, y0) = points[0];
                     let col0 = x0.round() as u16;
