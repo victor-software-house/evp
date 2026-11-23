@@ -388,6 +388,33 @@ fn custom_face(bytes: Vec<u8>, family_name: &str, weight: &str) -> Result<FontIn
     })
 }
 
+/// The system fonts a macOS terminal falls back to for symbols its font
+/// lacks, such as Menlo's flag (U+2691), in the order they are tried.
+const SYSTEM_FALLBACK_FAMILIES: &[&str] = &["Menlo", "Apple Symbols"];
+
+/// The faces of `SYSTEM_FALLBACK_FAMILIES` installed on this machine. They
+/// come after the embedded fallbacks, so output is the same wherever the
+/// embedded fonts cover a character.
+fn system_fallbacks() -> Vec<FontInfo> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    SYSTEM_FALLBACK_FAMILIES
+        .iter()
+        .filter_map(|family| {
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..Default::default()
+            };
+            let id = db.query(&query)?;
+            let (bytes, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
+            // Only the first face of a collection is read; FontArc parses index 0.
+            (index == 0)
+                .then(|| custom_face(bytes, family, "normal").ok())
+                .flatten()
+        })
+        .collect()
+}
+
 /// The upright bold face of `family` in the folder of `path`, found the way a
 /// terminal finds the bold face of its configured font.
 fn sibling_bold(path: &std::path::Path, family: &str) -> Option<Vec<u8>> {
@@ -435,9 +462,13 @@ pub fn load_font_family(path: Option<&str>) -> Result<LoadedFontFamily> {
         let default = load_font_family(None)?.font_set;
         let offset = fonts.len();
         fonts.extend(default.fonts.iter().cloned());
+        let system_start = fonts.len();
+        fonts.extend(system_fallbacks());
+        let system: Vec<usize> = (system_start..fonts.len()).collect();
         let chain = |first: usize, list: &[usize]| -> Vec<usize> {
             std::iter::once(first)
                 .chain(list.iter().skip(1).map(|i| i + offset))
+                .chain(system.iter().copied())
                 .collect()
         };
 
