@@ -1770,7 +1770,8 @@ fn serialize_cursor_rects(cursors: &[CursorRect], total_ms: u32) -> String {
     s
 }
 
-fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String {
+fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32, font_size: f32) -> String {
+    let base = crate::pointer::scale_for_font(font_size);
     if mouse_spans.is_empty() {
         return String::new();
     }
@@ -1968,7 +1969,11 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             r#"<g><animateTransform attributeName="transform" type="scale" calcMode="discrete" values="{}" keyTimes="{}" dur="{}" begin="t.begin" fill="freeze"/>{}</g>"#,
             vals_click_vis
                 .iter()
-                .map(|v| if v == "visible" { "0.82" } else { "1" })
+                .map(|v| if v == "visible" {
+                    format!("{}", base * 0.82)
+                } else {
+                    format!("{base}")
+                })
                 .collect::<Vec<_>>()
                 .join(";"),
             format_key_time_list(&kt_click_vis),
@@ -2249,7 +2254,11 @@ impl SvgDoc {
         s.push_str(&serialize_cursor_rects(&self.cursor_rects, total_ms));
 
         // Mouse elements
-        s.push_str(&serialize_mouse_elements(&self.mouse_spans, total_ms));
+        s.push_str(&serialize_mouse_elements(
+            &self.mouse_spans,
+            total_ms,
+            self.font_size,
+        ));
 
         s.push_str("\n</svg>\n");
         s

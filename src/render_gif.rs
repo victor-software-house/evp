@@ -689,14 +689,26 @@ fn rasterize_raw_frame_idx(
                         let mut glyph_scale = if is_primary {
                             scale
                         } else {
-                            let cell_ratio = cell_w as f32 / cell_h as f32;
+                            // As Ghostty does: a fallback glyph takes the primary
+                            // font's height, and shrinks only when it would spill
+                            // out of its cells.
                             let (_, font_ref) = font_set.select_for_char(0, 'M');
                             let scaled_ref = font_ref.as_scaled(scale);
                             let ref_h = scaled_ref.ascent() - scaled_ref.descent();
                             let font_scaled = font.as_scaled(scale);
                             let glyph_h = font_scaled.ascent() - font_scaled.descent();
-                            let scale_factor = (ref_h / glyph_h) * cell_ratio;
-                            PxScale::from(scale.x * scale_factor)
+                            let mut factor = ref_h / glyph_h;
+                            let cells = unicode_width::UnicodeWidthChar::width(ch)
+                                .unwrap_or(1)
+                                .max(1);
+                            let room = (cell_w as usize * cells) as f32;
+                            let advance = font
+                                .as_scaled(PxScale::from(scale.x * factor))
+                                .h_advance(glyph_id);
+                            if advance > room {
+                                factor *= room / advance;
+                            }
+                            PxScale::from(scale.x * factor)
                         };
 
                         let mut char_baseline = if is_primary {
@@ -846,13 +858,16 @@ fn rasterize_raw_frame_idx(
             MouseState::Moving => {}
         }
 
-        for dy in crate::pointer::MIN..crate::pointer::HEIGHT {
-            for dx in crate::pointer::MIN..crate::pointer::WIDTH {
-                let (color, alpha) = if m_state == MouseState::Clicking {
-                    crate::pointer::scaled_pixel(dx, dy, 0.82)
+        let base = crate::pointer::scale_for_font(cfg.font_size_px);
+        let reach = |n: i32| (n as f32 * base).ceil() as i32;
+        for dy in crate::pointer::MIN..reach(crate::pointer::HEIGHT) {
+            for dx in crate::pointer::MIN..reach(crate::pointer::WIDTH) {
+                let press = if m_state == MouseState::Clicking {
+                    0.82
                 } else {
-                    crate::pointer::pixel(dx, dy)
+                    1.0
                 };
+                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * press);
                 let px = cx + dx;
                 let py = cy + dy;
                 if alpha > 0.0
