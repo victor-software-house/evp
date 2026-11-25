@@ -1,0 +1,555 @@
+terminal-text
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Draw text as a macOS terminal does: a tape font keeps the embedded fallbacks and finds its bold face, fallback glyphs take the primary font's height, symbols no bundled face has come from system fonts, a one-cell symbol prefers a text face to the emoji face, SVG text stays on its cells in browsers, box glyphs stay in their cells, and the pointer scales with the font.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp matches a terminal's glyph fallback, sizing and cell placement in GIF and SVG output, such as after its backup-font scaling fix 15011a9 covers these cases.
+---
+ src/font.rs       |  183 +++++++++++++++++++++++++++++++++++++++++++++++------
+ src/pointer.rs    |   47 +++++++++++++-
+ src/render_gif.rs |   43 ++++++++++--
+ src/render_svg.rs |   77 +++++++++++++++++++++-
+ 4 files changed, 315 insertions(+), 35 deletions(-)
+
+diff --git a/src/font.rs b/src/font.rs
+index 8646423241e0451dcd50894524870b76a326d58a..3bdadc89e1b07068adac03b9cc039b72818c46b4 100644
+--- a/src/font.rs
++++ b/src/font.rs
+@@ -242,6 +242,37 @@ impl FontInfo {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn a_custom_font_keeps_the_embedded_fallbacks() {
++        use ab_glyph::Font;
++        let path = concat!(
++            env!("CARGO_MANIFEST_DIR"),
++            "/assets/fonts/NotoSansMonoCJKjp-Subset.otf"
++        );
++        let set = super::load_font_family(Some(path)).unwrap().font_set;
++        assert_eq!(set.regular[0], 0);
++        assert!(set.regular.len() > 1);
++        let (idx, font) = set.select_for_char(0, '✔');
++        assert_ne!(idx, 0);
++        assert_ne!(font.glyph_id('✔').0, 0);
++    }
++
++    #[test]
++    fn a_narrow_symbol_takes_a_text_face_before_the_emoji_face() {
++        let path = concat!(
++            env!("CARGO_MANIFEST_DIR"),
++            "/assets/fonts/NotoSansMonoCJKjp-Subset.otf"
++        );
++        let set = super::load_font_family(Some(path)).unwrap().font_set;
++        let family = |ch| &set.fonts[set.select_for_char(0, ch).0].family_name;
++        assert_eq!(family('🚀'), super::EMOJI_FAMILY);
++        let text_face = set.regular.iter().any(|i| {
++            set.fonts[*i].family_name != super::EMOJI_FAMILY
++                && super::has_glyph(set.fonts[*i].get_font(), '⏺')
++        });
++        assert_eq!(family('⏺') != super::EMOJI_FAMILY, text_face);
++    }
++
+     use super::{FontInfo, SvgFontEmbeddingPolicy};
+ 
+     #[test]
+@@ -311,11 +342,24 @@ impl FontSet {
+     /// Select the best `(font_index, &FontArc)` for `ch` given cell style flags.
+     pub fn select_for_char(&self, flags: u8, ch: char) -> (usize, &FontArc) {
+         let indices = self.indices_for_flags(flags);
++        // A one-cell character shows as text, as a terminal draws it: the
++        // emoji face draws it only when no text face after it has it, so
++        // U+23FA is a circle rather than its emoji button.
++        let text = unicode_width::UnicodeWidthChar::width(ch) == Some(1);
++        let mut emoji = None;
+         for &idx in indices {
+             let font = self.fonts[idx].get_font();
+-            if has_glyph(font, ch) {
+-                return (idx, font);
++            if !has_glyph(font, ch) {
++                continue;
++            }
++            if text && self.fonts[idx].family_name == EMOJI_FAMILY {
++                emoji.get_or_insert((idx, font));
++                continue;
+             }
++            return (idx, font);
++        }
++        if let Some(found) = emoji {
++            return found;
+         }
+         let idx = indices[0];
+         (idx, self.fonts[idx].get_font())
+@@ -347,35 +391,136 @@ pub fn extract_family_name(ttf_bytes: &[u8], fallback: &str) -> String {
+     fallback.to_string()
+ }
+ 
+-/// Load the requested font set. If `path` is provided, it is loaded as a custom font.
+-/// Otherwise, the embedded JetBrains Mono family is loaded along with default fallbacks.
++/// The family a face belongs to, preferring the typographic family (name 16),
++/// which every weight of a family shares, over the legacy family (name 1).
++fn typographic_family(ttf_bytes: &[u8]) -> Option<String> {
++    let face = ttf_parser::Face::parse(ttf_bytes, 0).ok()?;
++    let named = |id| {
++        face.names()
++            .into_iter()
++            .find(|n| n.name_id == id)
++            .and_then(|n| n.to_string())
++    };
++    named(16).or_else(|| named(1))
++}
++
++fn custom_face(bytes: Vec<u8>, family_name: &str, weight: &str) -> Result<FontInfo> {
++    let face = FontArc::try_from_vec(bytes.clone()).context("invalid font file")?;
++    Ok(FontInfo {
++        font: OnceLock::from(face),
++        source: FontSource::Custom { bytes },
++        woff2_bytes: None,
++        family_name: family_name.to_string(),
++        weight: weight.to_string(),
++        style: "normal".to_string(),
++        is_custom: true,
++    })
++}
++
++/// The system fonts a macOS terminal falls back to for symbols its font
++/// lacks, such as Menlo's flag (U+2691) or STIX Two Math's record circle
++/// (U+23FA), in the order they are tried.
++const SYSTEM_FALLBACK_FAMILIES: &[&str] = &["Menlo", "Apple Symbols", "STIX Two Math"];
++
++/// The embedded emoji face, which draws a symbol as its emoji.
++const EMOJI_FAMILY: &str = "Noto Emoji";
++
++/// The faces of `SYSTEM_FALLBACK_FAMILIES` installed on this machine. They
++/// come after the embedded fallbacks, so output is the same wherever the
++/// embedded fonts cover a character.
++fn system_fallbacks() -> Vec<FontInfo> {
++    let mut db = fontdb::Database::new();
++    db.load_system_fonts();
++    SYSTEM_FALLBACK_FAMILIES
++        .iter()
++        .filter_map(|family| {
++            let query = fontdb::Query {
++                families: &[fontdb::Family::Name(family)],
++                ..Default::default()
++            };
++            let id = db.query(&query)?;
++            let (bytes, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
++            // Only the first face of a collection is read; FontArc parses index 0.
++            (index == 0)
++                .then(|| custom_face(bytes, family, "normal").ok())
++                .flatten()
++        })
++        .collect()
++}
++
++/// The upright bold face of `family` in the folder of `path`, found the way a
++/// terminal finds the bold face of its configured font.
++fn sibling_bold(path: &std::path::Path, family: &str) -> Option<Vec<u8>> {
++    let mut entries: Vec<_> = std::fs::read_dir(path.parent()?)
++        .ok()?
++        .flatten()
++        .map(|e| e.path())
++        .collect();
++    entries.sort();
++    entries.into_iter().filter(|p| p != path).find_map(|p| {
++        let ext = p.extension()?.to_str()?.to_ascii_lowercase();
++        if !matches!(ext.as_str(), "ttf" | "otf") {
++            return None;
++        }
++        let bytes = std::fs::read(&p).ok()?;
++        let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
++        let bold = face.weight().to_number() == 700 && !face.is_italic();
++        (bold && typographic_family(&bytes).as_deref() == Some(family)).then_some(bytes)
++    })
++}
++
++/// Load the requested font set. If `path` is provided, that face is the primary
++/// font, with the bold face of its family from the same folder when there is one;
++/// the embedded fallbacks still cover the characters it lacks, as a terminal's
++/// fallback fonts do. Otherwise, the embedded JetBrains Mono family is loaded
++/// along with default fallbacks.
+ pub fn load_font_family(path: Option<&str>) -> Result<LoadedFontFamily> {
+     if let Some(p) = path {
+         let bytes = std::fs::read(p).with_context(|| format!("reading font {p}"))?;
+-        let face = FontArc::try_from_vec(bytes.clone()).context("invalid font file")?;
+         let family_name = extract_family_name(&bytes, "CustomFont");
++        let typographic = typographic_family(&bytes);
++        let bold_bytes = typographic
++            .as_deref()
++            .and_then(|family| sibling_bold(std::path::Path::new(p), family));
++
++        let mut fonts = vec![custom_face(bytes, &family_name, "normal")?];
++        let bold_idx = match bold_bytes {
++            Some(b) => {
++                fonts.push(custom_face(b, &family_name, "bold")?);
++                fonts.len() - 1
++            }
++            None => 0,
++        };
+ 
+-        let info = FontInfo {
+-            font: OnceLock::from(face),
+-            source: FontSource::Custom { bytes },
+-            woff2_bytes: None,
+-            family_name,
+-            weight: "normal".to_string(),
+-            style: "normal".to_string(),
+-            is_custom: true,
++        let default = load_font_family(None)?.font_set;
++        let offset = fonts.len();
++        fonts.extend(default.fonts.iter().cloned());
++        let system_start = fonts.len();
++        fonts.extend(system_fallbacks());
++        let system: Vec<usize> = (system_start..fonts.len()).collect();
++        let chain = |first: usize, list: &[usize]| -> Vec<usize> {
++            std::iter::once(first)
++                .chain(list.iter().skip(1).map(|i| i + offset))
++                .chain(system.iter().copied())
++                .collect()
+         };
+ 
+         let font_set = FontSet {
+-            fonts: vec![info],
+-            regular: vec![0],
+-            bold: vec![0],
+-            italic: vec![0],
+-            bold_italic: vec![0],
++            regular: chain(0, &default.regular),
++            bold: chain(bold_idx, &default.bold),
++            italic: chain(0, &default.italic),
++            bold_italic: chain(bold_idx, &default.bold_italic),
++            fonts,
+         };
+ 
++        let description = if bold_idx == 0 {
++            format!("explicit path: {p} + embedded fallbacks")
++        } else {
++            format!("explicit path: {p} with its bold face + embedded fallbacks")
++        };
+         return Ok(LoadedFontFamily {
+             font_set,
+-            description: format!("explicit path: {p}"),
++            description,
+         });
+     }
+ 
+diff --git a/src/pointer.rs b/src/pointer.rs
+index cb5645b63e58a5470623f942be28507c847da2ce..56c02d528a57f7eb513bfe1d0329a5b53addf3cb 100644
+--- a/src/pointer.rs
++++ b/src/pointer.rs
+@@ -10,9 +10,21 @@ const POINTS: [(f32, f32); 7] = [
+     (18.0, 15.8),
+ ];
+ const OUTLINE: f32 = 0.75;
++/// Offset of the soft shadow macOS draws under its arrow, in arrow units.
++const SHADOW: (f32, f32) = (0.6, 1.4);
++const SHADOW_ALPHA: f32 = 0.3;
+ pub(crate) const MIN: i32 = -1;
+ pub(crate) const WIDTH: i32 = 21;
+ pub(crate) const HEIGHT: i32 = 30;
++/// The arrow's tip-to-tail height in `POINTS` units.
++const ARROW_HEIGHT: f32 = 27.0;
++/// macOS draws its arrow about 17 pt tall beside 13 pt terminal text.
++const HEIGHT_PER_FONT_PX: f32 = 17.0 / 13.0;
++
++/// The scale that sizes the arrow to the terminal font, as on screen.
++pub(crate) fn scale_for_font(font_px: f32) -> f32 {
++    font_px * HEIGHT_PER_FONT_PX / ARROW_HEIGHT
++}
+ 
+ pub(crate) fn svg() -> String {
+     let points = POINTS
+@@ -20,8 +32,9 @@ pub(crate) fn svg() -> String {
+         .map(|(x, y)| format!("{x},{y}"))
+         .collect::<Vec<_>>()
+         .join(" ");
++    let (sx, sy) = SHADOW;
+     format!(
+-        r##"<polygon points="{points}" fill="#111111" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>"##
++        r##"<polygon points="{points}" transform="translate({sx},{sy})" fill="#000000" fill-opacity="{SHADOW_ALPHA}" stroke="#000000" stroke-opacity="{SHADOW_ALPHA}" stroke-width="1.5" stroke-linejoin="round"/><polygon points="{points}" fill="#111111" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>"##
+     )
+ }
+ 
+@@ -49,6 +62,7 @@ fn sample(x: f32, y: f32) -> Option<f32> {
+ }
+ 
+ /// Four-by-four coverage sampling avoids the previous doubled bitmap's jagged edges.
++#[cfg(test)]
+ pub(crate) fn pixel(x: i32, y: i32) -> ([u8; 3], f32) {
+     scaled_pixel(x, y, 1.0)
+ }
+@@ -68,7 +82,7 @@ pub(crate) fn scaled_pixel(x: i32, y: i32, scale: f32) -> ([u8; 3], f32) {
+         }
+     }
+     if count == 0 {
+-        return ([0; 3], 0.0);
++        return shadow_pixel(x, y, scale);
+     }
+     (
+         [(value / count as f32).round() as u8; 3],
+@@ -76,6 +90,22 @@ pub(crate) fn scaled_pixel(x: i32, y: i32, scale: f32) -> ([u8; 3], f32) {
+     )
+ }
+ 
++/// Coverage of the arrow's shadow, drawn where the arrow itself is not.
++fn shadow_pixel(x: i32, y: i32, scale: f32) -> ([u8; 3], f32) {
++    let (ox, oy) = SHADOW;
++    let mut count = 0;
++    for sy in 0..4 {
++        for sx in 0..4 {
++            let px = (x as f32 + (sx as f32 + 0.5) / 4.0) / scale - ox;
++            let py = (y as f32 + (sy as f32 + 0.5) / 4.0) / scale - oy;
++            if sample(px, py).is_some() {
++                count += 1;
++            }
++        }
++    }
++    ([0; 3], SHADOW_ALPHA * count as f32 / 16.0)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -100,4 +130,17 @@ mod tests {
+         })));
+         assert!(svg().contains("stroke-width=\"1.5\""));
+     }
++
++    #[test]
++    fn arrow_matches_the_terminal_font() {
++        let tall = ARROW_HEIGHT * scale_for_font(13.0);
++        assert!((tall - 17.0).abs() < 0.01);
++    }
++
++    #[test]
++    fn shadow_falls_below_the_arrow() {
++        let (color, alpha) = pixel(1, 24);
++        assert_eq!(color, [0; 3]);
++        assert!(alpha > 0.0 && alpha <= SHADOW_ALPHA);
++    }
+ }
+diff --git a/src/render_gif.rs b/src/render_gif.rs
+index 27e8e877bfd1f9a9093da6044ef737d2da5718ad..d5976356ac0b5eb5d77162ac4aafeeadd6d272c1 100644
+--- a/src/render_gif.rs
++++ b/src/render_gif.rs
+@@ -689,14 +689,26 @@ fn rasterize_raw_frame_idx(
+                         let mut glyph_scale = if is_primary {
+                             scale
+                         } else {
+-                            let cell_ratio = cell_w as f32 / cell_h as f32;
++                            // As Ghostty does: a fallback glyph takes the primary
++                            // font's height, and shrinks only when it would spill
++                            // out of its cells.
+                             let (_, font_ref) = font_set.select_for_char(0, 'M');
+                             let scaled_ref = font_ref.as_scaled(scale);
+                             let ref_h = scaled_ref.ascent() - scaled_ref.descent();
+                             let font_scaled = font.as_scaled(scale);
+                             let glyph_h = font_scaled.ascent() - font_scaled.descent();
+-                            let scale_factor = (ref_h / glyph_h) * cell_ratio;
+-                            PxScale::from(scale.x * scale_factor)
++                            let mut factor = ref_h / glyph_h;
++                            let cells = unicode_width::UnicodeWidthChar::width(ch)
++                                .unwrap_or(1)
++                                .max(1);
++                            let room = (cell_w as usize * cells) as f32;
++                            let advance = font
++                                .as_scaled(PxScale::from(scale.x * factor))
++                                .h_advance(glyph_id);
++                            if advance > room {
++                                factor *= room / advance;
++                            }
++                            PxScale::from(scale.x * factor)
+                         };
+ 
+                         let mut char_baseline = if is_primary {
+@@ -757,6 +769,7 @@ fn rasterize_raw_frame_idx(
+                         });
+ 
+                         if let Some(bm) = bitmap.as_ref() {
++                            let box_glyph = is_box_drawing(ch);
+                             let mut draw_pen_x = pen_x;
+                             if !is_box_drawing(ch) {
+                                 draw_pen_x += (cfg.letter_spacing / 2.0).floor();
+@@ -772,6 +785,17 @@ fn rasterize_raw_frame_idx(
+                                     if px < 0 || py < 0 {
+                                         continue;
+                                     }
++                                    // A line or block stays inside its cell, as a
++                                    // terminal draws it; an overhang would outlive
++                                    // the cell's next redraw in the GIF's frame diff.
++                                    if box_glyph
++                                        && (px < x as i32
++                                            || px >= (x + cell_w) as i32
++                                            || py < y as i32
++                                            || py >= (y + cell_h) as i32)
++                                    {
++                                        continue;
++                                    }
+                                     let (px, py) = (px as u32, py as u32);
+                                     if px >= cfg.canvas_w || py >= cfg.canvas_h {
+                                         continue;
+@@ -846,13 +870,16 @@ fn rasterize_raw_frame_idx(
+             MouseState::Moving => {}
+         }
+ 
+-        for dy in crate::pointer::MIN..crate::pointer::HEIGHT {
+-            for dx in crate::pointer::MIN..crate::pointer::WIDTH {
+-                let (color, alpha) = if m_state == MouseState::Clicking {
+-                    crate::pointer::scaled_pixel(dx, dy, 0.82)
++        let base = crate::pointer::scale_for_font(cfg.font_size_px);
++        let reach = |n: i32| (n as f32 * base).ceil() as i32;
++        for dy in crate::pointer::MIN..reach(crate::pointer::HEIGHT) {
++            for dx in crate::pointer::MIN..reach(crate::pointer::WIDTH) {
++                let press = if m_state == MouseState::Clicking {
++                    0.82
+                 } else {
+-                    crate::pointer::pixel(dx, dy)
++                    1.0
+                 };
++                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * press);
+                 let px = cx + dx;
+                 let py = cy + dy;
+                 if alpha > 0.0
+diff --git a/src/render_svg.rs b/src/render_svg.rs
+index f2778fb902be4be4f75ea3b1c0defee0a79d7cd3..c0387edeb48dd3774ec975664ef3f5f2acd134b0 100644
+--- a/src/render_svg.rs
++++ b/src/render_svg.rs
+@@ -1770,7 +1770,8 @@ fn serialize_cursor_rects(cursors: &[CursorRect], total_ms: u32) -> String {
+     s
+ }
+ 
+-fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String {
++fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32, font_size: f32) -> String {
++    let base = crate::pointer::scale_for_font(font_size);
+     if mouse_spans.is_empty() {
+         return String::new();
+     }
+@@ -1968,7 +1969,11 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+             r#"<g><animateTransform attributeName="transform" type="scale" calcMode="discrete" values="{}" keyTimes="{}" dur="{}" begin="t.begin" fill="freeze"/>{}</g>"#,
+             vals_click_vis
+                 .iter()
+-                .map(|v| if v == "visible" { "0.82" } else { "1" })
++                .map(|v| if v == "visible" {
++                    format!("{}", base * 0.82)
++                } else {
++                    format!("{base}")
++                })
+                 .collect::<Vec<_>>()
+                 .join(";"),
+             format_key_time_list(&kt_click_vis),
+@@ -2028,7 +2033,8 @@ impl SvgDoc {
+         extra_css.push_str(".u { text-decoration: underline; }\n");
+         extra_css.push_str(".s { text-decoration: line-through; }\n");
+         extra_css.push_str(".us { text-decoration: underline line-through; }\n");
+-        extra_css.push_str("text, tspan { font-kerning: none; font-variant-ligatures: none; text-rendering: geometricPrecision; }\n");
++        // Browsers collapse spaces despite xml:space, which shifts every per-character x after them.
++        extra_css.push_str("text, tspan { white-space: pre; font-kerning: none; font-variant-ligatures: none; text-rendering: geometricPrecision; }\n");
+         let letter_spacing_style = if self.letter_spacing != 0.0 {
+             format!(
+                 "letter-spacing: {}px; ",
+@@ -2249,7 +2255,11 @@ impl SvgDoc {
+         s.push_str(&serialize_cursor_rects(&self.cursor_rects, total_ms));
+ 
+         // Mouse elements
+-        s.push_str(&serialize_mouse_elements(&self.mouse_spans, total_ms));
++        s.push_str(&serialize_mouse_elements(
++            &self.mouse_spans,
++            total_ms,
++            self.font_size,
++        ));
+ 
+         s.push_str("\n</svg>\n");
+         s
+@@ -3019,6 +3029,7 @@ fn render_from_frames(
+         });
+     }
+ 
++    let fallback_fonts = load_font_family(opts.font_path.as_deref())?.font_set;
+     let mut text_elements = Vec::new();
+     for span in &cell_spans {
+         if span.start_ms == span.end_ms {
+@@ -3030,12 +3041,25 @@ fn render_from_frames(
+         let x = cfg.content_x + span.col as u32 * cell_w;
+         let y = cfg.content_y + span.row as u32 * cell_h + baseline;
+ 
+-        let is_box = span.visual.text.chars().any(is_box_drawing);
++        let has_box = span.visual.text.chars().any(is_box_drawing);
++        // A fallback glyph wider than its cells is squeezed into them, as a
++        // terminal keeps every glyph inside its cell; the box path's
++        // textLength does that.
++        let is_box = has_box
++            || span.visual.text.chars().any(|c| {
++                overflows_cell(
++                    &fallback_fonts,
++                    span.visual.flags,
++                    c,
++                    opts.font_size,
++                    cell_w,
++                )
++            });
+         let mut scale_y = 1.0;
+         let mut cell_center_y_offset = 0.0;
+         let mut char_center_y_offset = 0.0;
+ 
+-        if is_box {
++        if has_box {
+             let scale_font = opts.font_size / cfg.font_size_px;
+             let char_h_svg = cfg.char_height_px as f32 * scale_font;
+             let ascent_svg = cfg.ascent_px as f32 * scale_font;
+@@ -3310,6 +3334,29 @@ fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+ }
+ 
+ /// Escape a string for use as an XML attribute value.
++/// Whether `c` comes from a fallback font and is wider than the cells it takes.
++fn overflows_cell(
++    fonts: &crate::font::FontSet,
++    flags: u8,
++    c: char,
++    font_size: f32,
++    cell_w: u32,
++) -> bool {
++    use ab_glyph::{Font, ScaleFont};
++    let (idx, font) = fonts.select_for_char(flags, c);
++    if fonts.indices_for_flags(flags).first() == Some(&idx) {
++        return false;
++    }
++    let scale = font
++        .pt_to_px_scale(font_size)
++        .unwrap_or(ab_glyph::PxScale::from(font_size));
++    let advance = font.as_scaled(scale).h_advance(font.glyph_id(c));
++    let cells = unicode_width::UnicodeWidthChar::width(c)
++        .unwrap_or(1)
++        .max(1);
++    advance > (cell_w as usize * cells) as f32 + 0.5
++}
++
+ fn escape_attr(s: &str) -> String {
+     s.replace('&', "&amp;")
+         .replace('<', "&lt;")
+@@ -3439,6 +3486,24 @@ mod tests {
+         std::fs::remove_file(svgz_path).ok();
+     }
+ 
++    #[test]
++    fn spaces_keep_their_cells_and_wide_fallback_glyphs_fit_theirs() {
++        let mut rec = synth_recording();
++        if let Frame::Key { cells, .. } = &mut rec.frames[0] {
++            cells[2] = CellSnap {
++                text: "✔".into(),
++                fg: [255, 255, 255],
++                bg: [0, 0, 0],
++                flags: 0,
++            };
++        }
++        let svg = render_svg_to_string(&rec, &SvgOptions::default()).unwrap();
++        assert!(svg.contains("white-space: pre;"));
++        let check = svg.find(">✔<").or_else(|| svg.find("✔")).unwrap();
++        let text_open = svg[..check].rfind("<text").unwrap();
++        assert!(svg[text_open..check].contains("lengthAdjust=\"spacingAndGlyphs\""));
++    }
++
+     #[test]
+     fn test_font_subset_on_checked_in_cjk_subset() {
+         let mut rec = synth_recording();

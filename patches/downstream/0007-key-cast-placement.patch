@@ -1,0 +1,157 @@
+key-cast-placement
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Let a tape size the key overlay with Set KeyCastScale and lift it off the bottom rows with Set KeyCastRise; unset, it draws as before.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp lets a tape size and place its key overlay.
+---
+ src/render_common.rs |    7 +++++++
+ src/render_gif.rs    |    9 +++++----
+ src/runner.rs        |   11 +++++++++--
+ src/script/ast.rs    |   10 ++++++++++
+ src/script/parser.rs |   10 ++++++++++
+ 5 files changed, 41 insertions(+), 6 deletions(-)
+
+diff --git a/src/render_common.rs b/src/render_common.rs
+index b4a91de0096b05e3051740543ba9b9c808154d18..f9b59f09df45d6843a7442cd9ae07adc8c7877eb 100644
+--- a/src/render_common.rs
++++ b/src/render_common.rs
+@@ -42,6 +42,11 @@ pub struct ViewportConfig {
+     pub ascent_px: u32,
+     /// Additive pixels added to each cell's width.
+     pub letter_spacing: f32,
++    /// How large the key overlay is drawn, as a multiple of its usual size.
++    pub key_cast_scale: f32,
++    /// How many rows above the grid's bottom edge the key overlay's bottom
++    /// edge sits.
++    pub key_cast_rise: f32,
+ }
+ 
+ /// Returns `true` if the character is a box drawing character.
+@@ -112,6 +117,8 @@ impl ViewportConfig {
+             char_height_px,
+             ascent_px,
+             letter_spacing,
++            key_cast_scale: 1.0,
++            key_cast_rise: 3.6,
+         }
+     }
+ }
+diff --git a/src/render_gif.rs b/src/render_gif.rs
+index c4101aaab674c932db3e01e154693a3ca692136b..a65ea4dfb6038ca791bcce9e97bf132870bd0f52 100644
+--- a/src/render_gif.rs
++++ b/src/render_gif.rs
+@@ -959,14 +959,15 @@ struct PillBox {
+     h: f32,
+ }
+ 
+-/// Where the key overlay sits: centred, just above the bottom three rows,
+-/// where a TUI often keeps its input line.
++/// Where the key overlay sits: centred, `key_cast_rise` rows above the
++/// grid's bottom, by default just above the bottom three rows, where a TUI
++/// often keeps its input line.
+ fn key_pill_box(
+     cast: &crate::recording::KeyCast,
+     font_set: &FontSet,
+     cfg: ViewportConfig,
+ ) -> (PillBox, PxScale) {
+-    let fs = cfg.font_size_px;
++    let fs = cfg.font_size_px * cfg.key_cast_scale;
+     let scale = PxScale::from(fs * 1.2);
+     let text_w = string_width(&cast.label, font_set, scale);
+     let h = (fs * 2.4).round();
+@@ -974,7 +975,7 @@ fn key_pill_box(
+     let content_w = cfg.cols as f32 * cfg.cell_width_px as f32;
+     let content_bottom = cfg.content_y as f32 + cfg.rows as f32 * cfg.cell_height_px as f32;
+     let x = (cfg.content_x as f32 + (content_w - w) / 2.0).round();
+-    let y = (content_bottom - 3.6 * cfg.cell_height_px as f32 - h).round();
++    let y = (content_bottom - cfg.key_cast_rise * cfg.cell_height_px as f32 - h).round();
+     (PillBox { x, y, w, h }, scale)
+ }
+ 
+diff --git a/src/runner.rs b/src/runner.rs
+index 5ad4c20f036baedf107d97a3a33ff36d950f2c74..40b999a56a4b1eab74203f6b8da85c712abb27c6 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -146,7 +146,7 @@ pub fn derive_options(s: &Settings) -> ViewportConfig {
+     let rows = s
+         .rows
+         .unwrap_or_else(|| (inner_h / cell_h_px).max(2) as u16);
+-    ViewportConfig::new(
++    let mut cfg = ViewportConfig::new(
+         cols,
+         rows,
+         s.framerate,
+@@ -157,7 +157,14 @@ pub fn derive_options(s: &Settings) -> ViewportConfig {
+         char_height_px,
+         ascent_px,
+         s.letter_spacing,
+-    )
++    );
++    if let Some(scale) = s.key_cast_scale {
++        cfg.key_cast_scale = scale;
++    }
++    if let Some(rise) = s.key_cast_rise {
++        cfg.key_cast_rise = rise;
++    }
++    cfg
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/src/script/ast.rs b/src/script/ast.rs
+index dfc7697b8162310a8923857672f0ddbf0a724b85..f36fc0811cdf633b72271633de1b12a56f425752 100644
+--- a/src/script/ast.rs
++++ b/src/script/ast.rs
+@@ -59,6 +59,14 @@ pub struct Settings {
+     /// (`Set ClickLead 40ms`). Zero draws the press with the event.
+     #[serde(default)]
+     pub click_lead: Duration,
++    /// The key overlay's size as a multiple of its usual size
++    /// (`Set KeyCastScale 1.5`); unset draws it at 1.
++    #[serde(default)]
++    pub key_cast_scale: Option<f32>,
++    /// How many rows above the grid's bottom the key overlay sits
++    /// (`Set KeyCastRise 10`); unset puts it just above the bottom three rows.
++    #[serde(default)]
++    pub key_cast_rise: Option<f32>,
+     pub typing_speed: Duration,
+     pub theme: Theme,
+     pub cursor_blink: bool,
+@@ -121,6 +129,8 @@ impl Default for Settings {
+             framerate: 50,
+             playback_speed: 1.0,
+             click_lead: Duration::ZERO,
++            key_cast_scale: None,
++            key_cast_rise: None,
+             typing_speed: Duration::from_millis(50),
+             theme: Theme::vhs_default(),
+             cursor_blink: true,
+diff --git a/src/script/parser.rs b/src/script/parser.rs
+index c26ac975e014bff04e4cd624cbf29970165d72d8..967876abb70e66a1792611db6d676aee8e3876a5 100644
+--- a/src/script/parser.rs
++++ b/src/script/parser.rs
+@@ -521,6 +521,8 @@ fn apply_set(rest: &[String], s: &mut Settings) -> Result<()> {
+         "BorderRadius" => s.border_radius = set_scalar_strict(rest, key)?.parse()?,
+         "LineHeight" => s.line_height = set_scalar_strict(rest, key)?.parse()?,
+         "Framerate" | "FrameRate" | "FPS" => s.framerate = set_scalar_strict(rest, key)?.parse()?,
++        "KeyCastScale" => s.key_cast_scale = Some(set_scalar_strict(rest, key)?.parse()?),
++        "KeyCastRise" => s.key_cast_rise = Some(set_scalar_strict(rest, key)?.parse()?),
+         "ClickLead" => s.click_lead = parse_duration(&set_scalar_strict(rest, key)?)?,
+         "PlaybackSpeed" => s.playback_speed = set_scalar_strict(rest, key)?.parse()?,
+         "TypingSpeed" => s.typing_speed = parse_duration(&set_scalar_strict(rest, key)?)?,
+@@ -1149,6 +1151,14 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn key_cast_scale_and_rise_are_unset_until_a_tape_sets_them() {
++        let s = parse("Output out.gif\n").expect("parse");
++        assert_eq!((s.settings.key_cast_scale, s.settings.key_cast_rise), (None, None));
++        let s = parse("Output out.gif\nSet KeyCastScale 1.5\nSet KeyCastRise 10\n").expect("parse");
++        assert_eq!((s.settings.key_cast_scale, s.settings.key_cast_rise), (Some(1.5), Some(10.0)));
++    }
++
+     #[test]
+     fn click_lead_defaults_to_zero_and_takes_a_duration() {
+         let s = parse("Output out.gif\n").expect("parse");

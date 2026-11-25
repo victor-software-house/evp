@@ -1,0 +1,27 @@
+# verctl publishes the fork's evp binary as a vendored set: upstream's version
+# plus -vsh.N, tagged evp-<version>, so a release never reads as an upstream
+# one. Raise N for a new build on the same upstream base, and start again at 1
+# after a rebase. .github/workflows/fork-release.yml builds and uploads it.
+
+runners:
+  macos:
+    labels: [macos-15]
+
+vendored:
+  evp:
+    version: 0.19.0-vsh.2
+    dir: target/dist/{id}
+    files:
+      - evp
+      - README.md
+      - AGENTS.md
+      - PATCHES.md
+      - ARCHITECTURE.md
+      - LICENSE
+      - licenses
+      - skills
+      - examples
+    notes: .ctl/release-notes.md
+    targets:
+      aarch64-apple-darwin:
+        runner: macos

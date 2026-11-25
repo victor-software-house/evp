@@ -1,0 +1,21 @@
+min_version = "2026.11.0"
+
+[settings]
+experimental = true
+lockfile = true
+
+[env]
+FORKCTL_MANIFEST = "patches/fork.yaml"
+
+# The release build: Rust at upstream's release toolchain, and the Zig that
+# builds the pinned Ghostty commit's libghostty-vt.
+[tools]
+rust = { version = "1.95.0", profile = "minimal", targets = "aarch64-apple-darwin" }
+zig = "0.15.2"
+
+[task_config]
+includes = [
+  "mise-tasks",
+  "git::https://github.com/victor-software-house/forkctl.git//tasks/fork?ref=v0.1.1",
+  "git::https://github.com/victor-software-house/verctl.git//tasks/ver?ref=v0.8.6-rc.8",
+]
