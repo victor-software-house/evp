@@ -709,14 +709,14 @@ impl MouseSegmentTracker {
                 coords,
                 mods: self.mods,
                 delay,
-                easing: Some(best_easing),
+                easing: Some(best_easing.into()),
             })
         } else {
             Some(Event::MouseMove {
                 coords,
                 mods: self.mods,
                 delay,
-                easing: Some(best_easing),
+                easing: Some(best_easing.into()),
             })
         };
 
@@ -1368,7 +1368,7 @@ pub fn record(
                                                                     coords: vec![(drag_start_col, drag_start_row), (col, pty_row)],
                                                                     mods: ev_mods,
                                                                     delay: Duration::from_millis(50),
-                                                                    easing: Some(StandardEasing::InOutElastic),
+                                                                    easing: Some(crate::hand::MouseEasing::Standard(StandardEasing::InOutElastic)),
                                                                 });
                                                             }
                                                         } else if button == Some(MouseButton::Right) {

@@ -5,6 +5,7 @@
 //! line into tokens (whitespace separated, with `"…"` / `'…'` / `` `…` ``
 //! quoted strings preserved verbatim) then dispatch on the first token.
 
+use crate::hand::MouseEasing;
 use easing_function::easings::StandardEasing;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -798,6 +799,14 @@ fn parse_explicit_key_action(tokens: &[String], action: KeyAction) -> Result<Eve
     })
 }
 
+/// A mouse easing name: `Hand`, the measured pointing stroke, or a standard curve.
+fn parse_mouse_easing(name: &str) -> Result<MouseEasing> {
+    if name.eq_ignore_ascii_case("hand") {
+        return Ok(MouseEasing::Hand);
+    }
+    parse_easing(name).map(MouseEasing::Standard)
+}
+
 fn parse_easing(name: &str) -> Result<StandardEasing> {
     match name
         .to_ascii_lowercase()
@@ -844,7 +853,7 @@ fn parse_mouse_config(
     head: &str,
     prefix: &str,
     default_delay: Duration,
-) -> Result<(Duration, Option<StandardEasing>)> {
+) -> Result<(Duration, Option<MouseEasing>)> {
     let parts = head
         .strip_prefix(prefix)
         .and_then(|s| s.strip_prefix('@'))
@@ -858,7 +867,7 @@ fn parse_mouse_config(
     match sub_parts.len() {
         1 => {
             let token = sub_parts[0];
-            if let Ok(easing) = parse_easing(token) {
+            if let Ok(easing) = parse_mouse_easing(token) {
                 Ok((default_delay, Some(easing)))
             } else {
                 let delay = parse_duration(token)?;
@@ -867,7 +876,7 @@ fn parse_mouse_config(
         }
         2 => {
             let delay = parse_duration(sub_parts[0])?;
-            let easing = parse_easing(sub_parts[1])?;
+            let easing = parse_mouse_easing(sub_parts[1])?;
             Ok((delay, Some(easing)))
         }
         _ => bail!("Invalid mouse configuration syntax on {}: {}", prefix, head),
@@ -1409,11 +1418,11 @@ mod tests {
         assert_eq!(s_easing.events.len(), 2);
         assert!(matches!(
             &s_easing.events[0],
-            Event::MouseMove { coords, delay, easing: Some(StandardEasing::InOutElastic), .. } if *delay == Duration::from_millis(100) && coords == &vec![(10, 10), (20, 20)]
+            Event::MouseMove { coords, delay, easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)), .. } if *delay == Duration::from_millis(100) && coords == &vec![(10, 10), (20, 20)]
         ));
         assert!(matches!(
             &s_easing.events[1],
-            Event::MouseDrag { coords, delay, easing: Some(StandardEasing::InOutQuadradic), .. } if *delay == Duration::from_millis(50) && coords == &vec![(30, 30), (40, 40)]
+            Event::MouseDrag { coords, delay, easing: Some(MouseEasing::Standard(StandardEasing::InOutQuadradic)), .. } if *delay == Duration::from_millis(50) && coords == &vec![(30, 30), (40, 40)]
         ));
     }
 
@@ -1495,7 +1504,7 @@ mod tests {
                     ..ModSet::default()
                 },
                 delay: Duration::from_millis(50),
-                easing: Some(StandardEasing::InOutElastic),
+                easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)),
             },
             Event::MouseScroll {
                 col: 9,
@@ -1612,7 +1621,7 @@ mod tests {
             Event::MouseMove {
                 coords,
                 mods,
-                easing: Some(StandardEasing::InOutElastic),
+                easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)),
                 ..
             } if mods.alt && !mods.ctrl && coords == &vec![(5, 6), (7, 8)]
         ));

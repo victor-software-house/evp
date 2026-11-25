@@ -28,6 +28,7 @@
 
 pub mod font;
 pub mod full_recording;
+pub mod hand;
 pub mod keys;
 mod pointer;
 pub mod pty;

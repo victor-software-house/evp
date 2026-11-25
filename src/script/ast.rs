@@ -12,7 +12,6 @@
 
 use std::time::Duration;
 
-use easing_function::easings::StandardEasing;
 use serde::{Deserialize, Serialize};
 
 use crate::{FrameStyle, Theme, WindowBarStyle};
@@ -188,14 +187,14 @@ pub enum Event {
         coords: Vec<(u16, u16)>,
         mods: ModSet,
         delay: Duration,
-        easing: Option<StandardEasing>,
+        easing: Option<crate::hand::MouseEasing>,
     },
     /// Move mouse without pressing any buttons.
     MouseMove {
         coords: Vec<(u16, u16)>,
         mods: ModSet,
         delay: Duration,
-        easing: Option<StandardEasing>,
+        easing: Option<crate::hand::MouseEasing>,
     },
     /// Scroll mouse wheel.
     MouseScroll {
