@@ -334,6 +334,9 @@ pub fn run_with_raw_frame_consumers(
     let mut hidden = false;
     let mut hidden_started_at: Option<Duration> = None;
     let mut skipped_recording_time = Duration::ZERO;
+    // How long `Wait`s have held the timeline back. Every event after a
+    // wait, and the pointer drawn with them, moves later by this much.
+    let mut wait_delay = Duration::ZERO;
     let mut clipboard = String::new();
     let mut pending_screenshots: Vec<PathBuf> = Vec::new();
 
@@ -391,10 +394,12 @@ pub fn run_with_raw_frame_consumers(
                 // before the run) would be in the past and the loop would
                 // exit before the post-Wait tail (e.g. a `Sleep`) is shown.
                 total_duration += now.saturating_sub(w.started_at);
+                wait_delay += now.saturating_sub(w.started_at);
                 wait_state = None;
             } else if now >= w.deadline {
                 warn!(pattern = %w.pattern, "wait timed out");
                 total_duration += now.saturating_sub(w.started_at);
+                wait_delay += now.saturating_sub(w.started_at);
                 wait_state = None;
             }
         }
@@ -403,9 +408,9 @@ pub fn run_with_raw_frame_consumers(
         loop {
             let next_event_at = if wait_state.is_none()
                 && event_idx < timeline.len()
-                && timeline[event_idx].at <= now
+                && timeline[event_idx].at + wait_delay <= now
             {
-                Some(timeline[event_idx].at)
+                Some(timeline[event_idx].at + wait_delay)
             } else {
                 None
             };
@@ -474,7 +479,12 @@ pub fn run_with_raw_frame_consumers(
                         &mut prev_cursor_pos,
                         script.settings.theme.cursor_accent_rgb().ok().flatten(),
                     )?;
-                    frame.mouse_cursor = resolve_mouse_position(recorded_at, &mouse_segments);
+                    // The pointer's segments are on the script's timeline,
+                    // which waits push back; the frame's own time is not.
+                    frame.mouse_cursor = resolve_mouse_position(
+                        next_frame_at.saturating_sub(wait_delay),
+                        &mouse_segments,
+                    );
                     frame.key_cast = key_cast.at(recorded_at);
                     if !pending_screenshots.is_empty() {
                         let shots = std::mem::take(&mut pending_screenshots);
