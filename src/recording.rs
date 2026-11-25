@@ -79,6 +79,19 @@ pub struct RawFrame {
     pub mouse_cursor: Option<(f32, f32, MouseState)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<String>,
+    /// The keys pressed last, shown as an overlay while they are recent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key_cast: Option<KeyCast>,
+}
+
+/// Keys pressed in a burst, such as a typed word or `⌃F`, with their timing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyCast {
+    pub label: String,
+    /// Time since the burst's first key.
+    pub shown_ms: u32,
+    /// Time since its last key.
+    pub idle_ms: u32,
 }
 
 impl RawFrame {
@@ -92,6 +105,7 @@ impl RawFrame {
             && self.cursor_accent == other.cursor_accent
             && self.title == other.title
             && self.mouse_cursor == other.mouse_cursor
+            && self.key_cast == other.key_cast
             && self.cells == other.cells
     }
 }
@@ -122,6 +136,8 @@ pub enum Frame {
         mouse_cursor: Option<(f32, f32, MouseState)>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        key_cast: Option<KeyCast>,
         cells: Vec<CellSnap>,
     },
     Diff {
@@ -137,6 +153,8 @@ pub enum Frame {
         mouse_cursor: Option<(f32, f32, MouseState)>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        key_cast: Option<KeyCast>,
         changes: Vec<CellChange>,
     },
 }
@@ -254,6 +272,7 @@ impl RecordingBuilder {
                 cursor_accent: frame.cursor_accent,
                 mouse_cursor: frame.mouse_cursor,
                 title: frame.title.clone(),
+                key_cast: frame.key_cast.clone(),
                 cells: frame.cells.clone(),
             });
             self.frames_since_key = 0;
@@ -277,6 +296,7 @@ impl RecordingBuilder {
                 cursor_accent: frame.cursor_accent,
                 mouse_cursor: frame.mouse_cursor,
                 title: frame.title.clone(),
+                key_cast: frame.key_cast.clone(),
                 changes,
             });
             self.frames_since_key += 1;
@@ -325,6 +345,7 @@ impl Recording {
         let mut cursor_accent;
         let mut mouse_cursor;
         let mut title;
+        let mut key_cast;
         match &self.frames[key_i] {
             Frame::Key {
                 t_ms: t,
@@ -335,6 +356,7 @@ impl Recording {
                 cursor_accent: ca,
                 mouse_cursor: mc,
                 title: ttl,
+                key_cast: kc,
                 cells: cs,
             } => {
                 cells = cs.clone();
@@ -346,6 +368,7 @@ impl Recording {
                 cursor_accent = *ca;
                 mouse_cursor = *mc;
                 title = ttl.clone();
+                key_cast = kc.clone();
             }
             Frame::Diff { .. } => unreachable!(),
         }
@@ -363,6 +386,7 @@ impl Recording {
                     cursor_accent: ca,
                     mouse_cursor: mc,
                     title: ttl,
+                    key_cast: kc,
                     changes,
                 } => {
                     t_ms = *t;
@@ -373,6 +397,7 @@ impl Recording {
                     cursor_accent = *ca;
                     mouse_cursor = *mc;
                     title = ttl.clone();
+                    key_cast = kc.clone();
                     for ch in changes {
                         if let Some(slot) = cells.get_mut(ch.idx as usize) {
                             *slot = ch.cell.clone();
@@ -394,6 +419,7 @@ impl Recording {
             cursor_accent,
             mouse_cursor,
             title,
+            key_cast,
         })
     }
 }

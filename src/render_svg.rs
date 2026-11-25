@@ -3421,6 +3421,7 @@ mod tests {
                 cursor_accent: None,
                 mouse_cursor: None,
                 title: None,
+                key_cast: None,
                 cells,
             }],
         }
