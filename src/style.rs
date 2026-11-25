@@ -61,6 +61,10 @@ pub struct Theme {
     pub white: String,
     #[serde(rename = "brightWhite")]
     pub bright_white: String,
+    /// All 256 indexed colours, for a terminal that derives 16 to 255 from its
+    /// theme; without it, the 16 colours above are used and 16 to 255 generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<Vec<String>>,
 }
 
 impl Theme {
@@ -88,6 +92,7 @@ impl Theme {
             bright_cyan: DEFAULT_BRIGHT_CYAN.to_string(),
             white: DEFAULT_WHITE.to_string(),
             bright_white: DEFAULT_BRIGHT_WHITE.to_string(),
+            palette: None,
         }
     }
 
@@ -110,6 +115,21 @@ impl Theme {
             .collect::<Vec<_>>();
         names.sort_by_key(|name| name.to_ascii_lowercase());
         Ok(names)
+    }
+
+    /// The theme's 256 indexed colours, when it lists them.
+    pub fn palette256_rgb(&self) -> Result<Option<[[u8; 3]; 256]>> {
+        let Some(list) = &self.palette else {
+            return Ok(None);
+        };
+        if list.len() != 256 {
+            bail!("a theme's palette lists 256 colours, not {}", list.len());
+        }
+        let mut out = [[0u8; 3]; 256];
+        for (slot, colour) in out.iter_mut().zip(list) {
+            *slot = parse_hex_color(colour)?;
+        }
+        Ok(Some(out))
     }
 
     pub fn palette_rgb(&self) -> Result<[[u8; 3]; 16]> {
@@ -228,6 +248,7 @@ struct ThemePatch {
     cursor: Option<String>,
     #[serde(rename = "cursorAccent")]
     cursor_accent: Option<String>,
+    palette: Option<Vec<String>>,
     black: Option<String>,
     #[serde(rename = "brightBlack")]
     bright_black: Option<String>,
@@ -280,8 +301,10 @@ impl ThemePatch {
             bright_cyan: self.bright_cyan.unwrap_or(default.bright_cyan),
             white: self.white.unwrap_or(default.white),
             bright_white: self.bright_white.unwrap_or(default.bright_white),
+            palette: self.palette,
         };
         theme.palette_rgb()?;
+        theme.palette256_rgb()?;
         theme.background_rgb()?;
         theme.foreground_rgb()?;
         theme.cursor_rgb()?;

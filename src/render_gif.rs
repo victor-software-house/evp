@@ -228,11 +228,7 @@ pub fn render_png_frame(frame: &RawFrame, opts: &RenderOptions, out: &Path) -> R
             }
         }
     }
-    let palette = generate_256_palette(
-        opts.theme.palette_rgb()?,
-        opts.theme.background_rgb()?,
-        opts.theme.foreground_rgb()?,
-    );
+    let palette = theme_palette(&opts.theme)?;
     let title_font_set = if let Some(ref path) = opts.window_bar_font_family {
         load_font_family(Some(path))
             .map(|l| l.font_set)
@@ -288,10 +284,7 @@ fn run_gif_stream_worker(
     let no_system_fonts = opts.no_system_fonts;
     let theme = opts.theme.clone();
 
-    let base16 = theme.palette_rgb()?;
-    let bg = theme.background_rgb()?;
-    let fg = theme.foreground_rgb()?;
-    let palette = generate_256_palette(base16, bg, fg);
+    let palette = theme_palette(&theme)?;
 
     let mut flattened_palette = [0u8; 768];
     for i in 0..256 {
@@ -427,6 +420,7 @@ fn run_gif_stream_worker(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn is_cell_changed(
     col: usize,
     row: usize,
@@ -435,10 +429,22 @@ fn is_cell_changed(
     cfg: ViewportConfig,
     cell_w: u32,
     cell_h: u32,
+    pills: &[PillBox],
 ) -> bool {
     let Some(prev) = prev else {
         return true;
     };
+
+    let cell_x = (cfg.content_x + col as u32 * cell_w) as f32;
+    let cell_y = (cfg.content_y + row as u32 * cell_h) as f32;
+    if pills.iter().any(|p| {
+        cell_x < p.x + p.w + 1.0
+            && cell_x + cell_w as f32 > p.x - 1.0
+            && cell_y < p.y + p.h + 1.0
+            && cell_y + cell_h as f32 > p.y - 1.0
+    }) {
+        return true;
+    }
 
     let idx = row * curr.cols as usize + col;
     let prev_idx = row * prev.cols as usize + col;
@@ -648,9 +654,24 @@ fn rasterize_raw_frame_idx(
         }
     }
 
+    // The key overlay is drawn over the cells each frame it shows, so the
+    // cells under it, and under the one before it, are drawn again first.
+    let pills: Vec<PillBox> = if prev.is_some() {
+        [
+            curr.key_cast.as_ref(),
+            prev.and_then(|p| p.key_cast.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|cast| key_pill_box(cast, font_set, cfg).0)
+        .collect()
+    } else {
+        Vec::new()
+    };
+
     for row in 0..curr.rows as usize {
         for col in 0..curr.cols as usize {
-            if is_cell_changed(col, row, curr, prev, cfg, cell_w, cell_h) {
+            if is_cell_changed(col, row, curr, prev, cfg, cell_w, cell_h, &pills) {
                 let x = cfg.content_x + col as u32 * cell_w;
                 let y = cfg.content_y + row as u32 * cell_h;
 
@@ -831,6 +852,19 @@ fn rasterize_raw_frame_idx(
 
     // Margin, border, and padding restoration is now handled at the start of rasterize_raw_frame_idx.
 
+    if let Some(cast) = curr.key_cast.as_ref() {
+        draw_key_pill_idx(
+            buf,
+            prev_buf,
+            palette,
+            cfg,
+            cast,
+            font_set,
+            glyph_cache,
+            curr.default_bg,
+        );
+    }
+
     if let Some((m_col, m_row, m_state)) = curr.mouse_cursor {
         use crate::recording::MouseState;
         let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
@@ -913,6 +947,100 @@ fn rasterize_raw_frame_idx(
             margin_idx,
         );
     }
+}
+
+/// A key overlay's box, in canvas pixels.
+#[derive(Debug, Clone, Copy)]
+struct PillBox {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Where the key overlay sits: centred, just above the bottom three rows,
+/// where a TUI often keeps its input line.
+fn key_pill_box(
+    cast: &crate::recording::KeyCast,
+    font_set: &FontSet,
+    cfg: ViewportConfig,
+) -> (PillBox, PxScale) {
+    let fs = cfg.font_size_px;
+    let scale = PxScale::from(fs * 1.2);
+    let text_w = string_width(&cast.label, font_set, scale);
+    let h = (fs * 2.4).round();
+    let w = (text_w + fs * 2.0).round().max(h);
+    let content_w = cfg.cols as f32 * cfg.cell_width_px as f32;
+    let content_bottom = cfg.content_y as f32 + cfg.rows as f32 * cfg.cell_height_px as f32;
+    let x = (cfg.content_x as f32 + (content_w - w) / 2.0).round();
+    let y = (content_bottom - 3.6 * cfg.cell_height_px as f32 - h).round();
+    (PillBox { x, y, w, h }, scale)
+}
+
+/// Draws the keys pressed last as a rounded pill that fades out after them.
+#[allow(clippy::too_many_arguments)]
+fn draw_key_pill_idx(
+    buf: &mut [u8],
+    prev_buf: Option<&[u8]>,
+    palette: &[[u8; 3]; 256],
+    cfg: ViewportConfig,
+    cast: &crate::recording::KeyCast,
+    font_set: &FontSet,
+    glyph_cache: &mut GlyphCache,
+    default_bg: [u8; 3],
+) {
+    const FADE_MS: u32 = 250;
+    const EDGE: [u8; 3] = [74, 72, 69];
+    const FILL: [u8; 3] = [34, 33, 31];
+    const TEXT: [u8; 3] = [239, 236, 231];
+    let visible = crate::keycast::VISIBLE_MS;
+    let fade = if cast.idle_ms + FADE_MS > visible {
+        visible.saturating_sub(cast.idle_ms) as f32 / FADE_MS as f32
+    } else {
+        1.0
+    };
+    let (b, scale) = key_pill_box(cast, font_set, cfg);
+    let r = b.h / 2.0;
+    let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+    for py in (b.y as i32 - 1)..=((b.y + b.h) as i32 + 1) {
+        for px in (b.x as i32 - 1)..=((b.x + b.w) as i32 + 1) {
+            if px < 0 || py < 0 || px as u32 >= cfg.canvas_w || py as u32 >= cfg.canvas_h {
+                continue;
+            }
+            let dx = ((px as f32 + 0.5 - cx).abs() - (b.w / 2.0 - r)).max(0.0);
+            let dy = ((py as f32 + 0.5 - cy).abs() - (b.h / 2.0 - r)).max(0.0);
+            let d = (dx * dx + dy * dy).sqrt() - r;
+            let outer = (0.5 - d).clamp(0.0, 1.0);
+            if outer <= 0.0 {
+                continue;
+            }
+            let inner = (0.5 - (d + 1.5)).clamp(0.0, 1.0);
+            let (x, y) = (px as u32, py as u32);
+            blend_pixel_idx(buf, prev_buf, palette, cfg.canvas_w, x, y, EDGE, outer * fade, default_bg);
+            if inner > 0.0 {
+                blend_pixel_idx(buf, prev_buf, palette, cfg.canvas_w, x, y, FILL, inner * fade, default_bg);
+            }
+        }
+    }
+    let text = [0, 1, 2].map(|i| (FILL[i] as f32 + (TEXT[i] as f32 - FILL[i] as f32) * fade).round() as u8);
+    let text_w = string_width(&cast.label, font_set, scale);
+    let (_, font) = font_set.select_for_char(0, 'M');
+    let scaled = font.as_scaled(scale);
+    let baseline = cy + (scaled.ascent() + scaled.descent()) / 2.0;
+    draw_string_idx(
+        buf,
+        prev_buf,
+        palette,
+        cfg.canvas_w,
+        (cx - text_w / 2.0).round().max(0.0) as u32,
+        baseline.round().max(0.0) as u32,
+        &cast.label,
+        font_set,
+        scale,
+        text,
+        glyph_cache,
+        default_bg,
+    );
 }
 
 fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
@@ -1304,6 +1432,19 @@ fn lerp_lab(t: f32, lab1: [f32; 3], lab2: [f32; 3]) -> [f32; 3] {
 }
 
 /// Generates a cohesive 256-color palette based on the active terminal theme.
+/// The GIF's colours: the theme's own 256 when it lists them, or 16 to 255
+/// generated from its 16.
+fn theme_palette(theme: &crate::Theme) -> Result<[[u8; 3]; 256]> {
+    if let Some(all) = theme.palette256_rgb()? {
+        return Ok(all);
+    }
+    Ok(generate_256_palette(
+        theme.palette_rgb()?,
+        theme.background_rgb()?,
+        theme.foreground_rgb()?,
+    ))
+}
+
 fn generate_256_palette(base16: [[u8; 3]; 16], bg: [u8; 3], fg: [u8; 3]) -> [[u8; 3]; 256] {
     let bg_lab = rgb_to_lab(bg);
     let fg_lab = rgb_to_lab(fg);

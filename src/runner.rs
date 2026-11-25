@@ -330,6 +330,7 @@ pub fn run_with_raw_frame_consumers(
     let start = Instant::now();
     let mut next_frame_at = Duration::ZERO;
     let mut event_idx = 0usize;
+    let mut key_cast = crate::keycast::KeyCaster::default();
     let mut hidden = false;
     let mut hidden_started_at: Option<Duration> = None;
     let mut skipped_recording_time = Duration::ZERO;
@@ -436,6 +437,9 @@ pub fn run_with_raw_frame_consumers(
                     "dispatching scheduled event"
                 );
 
+                if !hidden {
+                    key_cast.press(&scheduled.event, now.saturating_sub(skipped_recording_time));
+                }
                 let was_hidden = hidden;
                 execute_event(
                     &scheduled.event,
@@ -481,6 +485,7 @@ pub fn run_with_raw_frame_consumers(
                         next_frame_at.saturating_sub(wait_delay),
                         &mouse_segments,
                     );
+                    frame.key_cast = key_cast.at(recorded_at);
                     if !pending_screenshots.is_empty() {
                         let shots = std::mem::take(&mut pending_screenshots);
                         for path in shots {
@@ -632,7 +637,11 @@ pub fn apply_theme(terminal: &mut Terminal<'_, '_>, theme: &crate::Theme) -> Res
     // OSC 4 controls indexed palette entries, OSC 10/11/12 control
     // foreground/background/cursor color. Using ST terminator keeps the
     // sequences unambiguous for the VT parser.
-    for (idx, rgb) in theme.palette_rgb()?.iter().enumerate() {
+    let indexed: Vec<[u8; 3]> = match theme.palette256_rgb()? {
+        Some(all) => all.to_vec(),
+        None => theme.palette_rgb()?.to_vec(),
+    };
+    for (idx, rgb) in indexed.iter().enumerate() {
         let seq = format!(
             "\x1b]4;{idx};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
             rgb[0], rgb[1], rgb[2]
@@ -1466,6 +1475,7 @@ fn write_screenshot(frame: &RawFrame, script: &Script, path: &std::path::Path) -
                 cursor_accent: frame.cursor_accent,
                 mouse_cursor: frame.mouse_cursor,
                 title: frame.title.clone(),
+                key_cast: frame.key_cast.clone(),
                 cells: frame.cells.clone(),
             }],
         };
@@ -1718,6 +1728,7 @@ pub fn capture<'a>(
             cursor_accent,
             mouse_cursor: None,
             title,
+            key_cast: None,
         },
         raw_cursor_pos,
     ))
