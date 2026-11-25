@@ -521,6 +521,8 @@ fn apply_set(rest: &[String], s: &mut Settings) -> Result<()> {
         "BorderRadius" => s.border_radius = set_scalar_strict(rest, key)?.parse()?,
         "LineHeight" => s.line_height = set_scalar_strict(rest, key)?.parse()?,
         "Framerate" | "FrameRate" | "FPS" => s.framerate = set_scalar_strict(rest, key)?.parse()?,
+        "KeyCastScale" => s.key_cast_scale = Some(set_scalar_strict(rest, key)?.parse()?),
+        "KeyCastRise" => s.key_cast_rise = Some(set_scalar_strict(rest, key)?.parse()?),
         "ClickLead" => s.click_lead = parse_duration(&set_scalar_strict(rest, key)?)?,
         "PlaybackSpeed" => s.playback_speed = set_scalar_strict(rest, key)?.parse()?,
         "TypingSpeed" => s.typing_speed = parse_duration(&set_scalar_strict(rest, key)?)?,
@@ -1147,6 +1149,14 @@ mod tests {
             format!("{err:#}").contains("cycle"),
             "expected cycle error, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn key_cast_scale_and_rise_are_unset_until_a_tape_sets_them() {
+        let s = parse("Output out.gif\n").expect("parse");
+        assert_eq!((s.settings.key_cast_scale, s.settings.key_cast_rise), (None, None));
+        let s = parse("Output out.gif\nSet KeyCastScale 1.5\nSet KeyCastRise 10\n").expect("parse");
+        assert_eq!((s.settings.key_cast_scale, s.settings.key_cast_rise), (Some(1.5), Some(10.0)));
     }
 
     #[test]

@@ -28,7 +28,18 @@ const TRANSPARENT_COLOR_INDEX: u8 = 255;
 
 const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 12;
 const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 12;
-const MOUSE_RIPPLE_MAX_RADIUS: i32 = 48; // Bounding box padding for mouse updates
+const MOUSE_RIPPLE_MAX_RADIUS: i32 = 64; // Bounding box padding for mouse updates
+/// How far a led click's ripple ring spreads, in pixels.
+const MOUSE_RIPPLE_RING_FROM: f32 = 10.0;
+const MOUSE_RIPPLE_RING_TO: f32 = 56.0;
+
+/// Where a frame draws its pointer and its click ripple, in cells.
+fn mouse_marks(f: Option<&RawFrame>) -> [Option<(f32, f32)>; 2] {
+    [
+        f.and_then(|f| f.mouse_cursor.map(|(c, r, _)| (c, r))),
+        f.and_then(|f| f.mouse_ripple.map(|(c, r, _)| (c, r))),
+    ]
+}
 
 /// Cache key identifying a rasterised glyph outline.
 #[derive(Hash, Eq, PartialEq)]
@@ -461,8 +472,8 @@ fn is_cell_changed(
         return true;
     }
 
-    for mouse in &[curr.mouse_cursor, prev.mouse_cursor] {
-        if let Some((m_col, m_row, _)) = *mouse {
+    for mark in mouse_marks(Some(curr)).into_iter().chain(mouse_marks(Some(prev))) {
+        if let Some((m_col, m_row)) = mark {
             let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
             let cy = (cfg.content_y as f32 + m_row * cell_h as f32 + cell_h as f32 / 2.0) as i32;
 
@@ -533,8 +544,8 @@ fn rasterize_raw_frame_idx(
     // We do this before rendering cells and the window bar so that we don't accidentally
     // overwrite newly rendered cells or window bar elements.
     if prev.is_some() {
-        for mouse in &[curr.mouse_cursor, prev.and_then(|p| p.mouse_cursor)] {
-            if let Some((m_col, m_row, _)) = *mouse {
+        for mark in mouse_marks(Some(curr)).into_iter().chain(mouse_marks(prev)) {
+            if let Some((m_col, m_row)) = mark {
                 let cx =
                     (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
                 let cy =
@@ -596,8 +607,8 @@ fn rasterize_raw_frame_idx(
     let prev_title = custom_title.or(prev.and_then(|p| p.title.as_deref()));
     let mut title_changed = prev.is_none() || title != prev_title;
     if !title_changed && cfg.frame_style.window_bar.enabled() {
-        for mouse in &[curr.mouse_cursor, prev.and_then(|p| p.mouse_cursor)] {
-            if let Some((_, m_row, _)) = *mouse {
+        for mark in mouse_marks(Some(curr)).into_iter().chain(mouse_marks(prev)) {
+            if let Some((_, m_row)) = mark {
                 let cy =
                     (cfg.content_y as f32 + m_row * cell_h as f32 + cell_h as f32 / 2.0) as i32;
                 let y_min = cy - MOUSE_RIPPLE_MAX_RADIUS;
@@ -865,6 +876,12 @@ fn rasterize_raw_frame_idx(
         );
     }
 
+    if let Some((r_col, r_row, age)) = curr.mouse_ripple {
+        let cx = cfg.content_x as f32 + r_col * cell_w as f32 + cell_w as f32 / 2.0;
+        let cy = cfg.content_y as f32 + r_row * cell_h as f32 + cell_h as f32 / 2.0;
+        draw_ripple_idx(buf, prev_buf, palette, cfg, cx, cy, age, curr.default_bg);
+    }
+
     if let Some((m_col, m_row, m_state)) = curr.mouse_cursor {
         use crate::recording::MouseState;
         let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
@@ -959,14 +976,15 @@ struct PillBox {
     h: f32,
 }
 
-/// Where the key overlay sits: centred, just above the bottom three rows,
-/// where a TUI often keeps its input line.
+/// Where the key overlay sits: centred, `key_cast_rise` rows above the
+/// grid's bottom, by default just above the bottom three rows, where a TUI
+/// often keeps its input line.
 fn key_pill_box(
     cast: &crate::recording::KeyCast,
     font_set: &FontSet,
     cfg: ViewportConfig,
 ) -> (PillBox, PxScale) {
-    let fs = cfg.font_size_px;
+    let fs = cfg.font_size_px * cfg.key_cast_scale;
     let scale = PxScale::from(fs * 1.2);
     let text_w = string_width(&cast.label, font_set, scale);
     let h = (fs * 2.4).round();
@@ -974,7 +992,7 @@ fn key_pill_box(
     let content_w = cfg.cols as f32 * cfg.cell_width_px as f32;
     let content_bottom = cfg.content_y as f32 + cfg.rows as f32 * cfg.cell_height_px as f32;
     let x = (cfg.content_x as f32 + (content_w - w) / 2.0).round();
-    let y = (content_bottom - 3.6 * cfg.cell_height_px as f32 - h).round();
+    let y = (content_bottom - cfg.key_cast_rise * cfg.cell_height_px as f32 - h).round();
     (PillBox { x, y, w, h }, scale)
 }
 
@@ -1254,6 +1272,44 @@ fn draw_circle_idx(
                         buf, prev_buf, palette, w, x as u32, y as u32, color, alpha, default_bg,
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Draws a led click's ripple: a ring that spreads out from the click and
+/// fades, over a soft disc that fades faster.
+#[allow(clippy::too_many_arguments)]
+fn draw_ripple_idx(
+    buf: &mut [u8],
+    prev_buf: Option<&[u8]>,
+    palette: &[[u8; 3]; 256],
+    cfg: ViewportConfig,
+    cx: f32,
+    cy: f32,
+    age: f32,
+    default_bg: [u8; 3],
+) {
+    const COLOR: [u8; 3] = [236, 233, 228];
+    const WIDTH: f32 = 3.0;
+    let age = age.clamp(0.0, 1.0);
+    let out = 1.0 - (1.0 - age).powi(3);
+    let r = MOUSE_RIPPLE_RING_FROM + (MOUSE_RIPPLE_RING_TO - MOUSE_RIPPLE_RING_FROM) * out;
+    let ring = 0.7 * (1.0 - age).powf(1.4);
+    let disc = 0.16 * (1.0 - age).powi(2);
+    let reach = (r + WIDTH + 1.0).ceil() as i32;
+    let (icx, icy) = (cx.round() as i32, cy.round() as i32);
+    for y in (icy - reach)..=(icy + reach) {
+        for x in (icx - reach)..=(icx + reach) {
+            if x < 0 || y < 0 || x as u32 >= cfg.canvas_w || y as u32 >= cfg.canvas_h {
+                continue;
+            }
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let edge = (WIDTH / 2.0 + 0.5 - (d - r).abs()).clamp(0.0, 1.0);
+            let inside = (r - d + 0.5).clamp(0.0, 1.0);
+            let alpha = (ring * edge).max(disc * inside);
+            if alpha > 0.0 {
+                blend_pixel_idx(buf, prev_buf, palette, cfg.canvas_w, x as u32, y as u32, COLOR, alpha, default_bg);
             }
         }
     }
