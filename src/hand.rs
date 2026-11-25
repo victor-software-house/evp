@@ -14,12 +14,20 @@ pub enum MouseEasing {
 }
 
 /// The share of the path a hand has covered at each fortieth of the move,
-/// averaged over straight strokes captured from a pointer at about 200 Hz.
+/// averaged over 84 clean pointing strokes captured at about 200 Hz.
 const HAND: [f32; 41] = [
-    0.0, 0.023, 0.042, 0.068, 0.102, 0.145, 0.188, 0.25, 0.316, 0.386, 0.458, 0.525, 0.585, 0.639,
-    0.676, 0.704, 0.729, 0.755, 0.773, 0.787, 0.802, 0.821, 0.839, 0.851, 0.857, 0.864, 0.871,
-    0.884, 0.897, 0.904, 0.911, 0.916, 0.922, 0.927, 0.933, 0.94, 0.952, 0.964, 0.976, 0.988, 1.0,
+    0.0, 0.023, 0.058, 0.105, 0.155, 0.208, 0.26, 0.313, 0.361, 0.409, 0.453, 0.495, 0.532, 0.569,
+    0.606, 0.643, 0.676, 0.707, 0.734, 0.759, 0.783, 0.804, 0.823, 0.84, 0.857, 0.874, 0.887,
+    0.901, 0.913, 0.925, 0.935, 0.944, 0.953, 0.961, 0.968, 0.974, 0.98, 0.985, 0.99, 0.995, 1.0,
 ];
+
+/// A leftward stroke sags downward by about this share of its length at its
+/// middle; other directions run straight.
+const LEFTWARD_SAG: f32 = 0.04;
+
+/// A terminal cell is about twice as tall as it is wide, so a path in cells
+/// is measured in widths.
+const CELL_ASPECT: f32 = 2.0;
 
 impl MouseEasing {
     pub fn ease(self, t: f32) -> f32 {
@@ -79,11 +87,33 @@ pub fn timed_path(
         let f = (target - lengths[i - 1]) / seg;
         (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
     };
+    // A hand's leftward stroke bows downward, most at its middle.
+    let (first, last) = (points[0], points[points.len() - 1]);
+    let (dx, dy) = (last.0 - first.0, (last.1 - first.1) * CELL_ASPECT);
+    let span = (dx * dx + dy * dy).sqrt();
+    let sag = if easing == MouseEasing::Hand && dx < 0.0 && span > 0.0 {
+        LEFTWARD_SAG * span
+    } else {
+        0.0
+    };
+    // The unit normal that points down the screen, in cell units.
+    let (nx, ny) = if span > 0.0 {
+        let (mut nx, mut ny) = (-dy / span, dx / span);
+        if ny < 0.0 {
+            (nx, ny) = (-nx, -ny);
+        }
+        (nx, ny / CELL_ASPECT)
+    } else {
+        (0.0, 0.0)
+    };
     let steps = (total_ms / step_ms).ceil().max(1.0) as usize;
     (0..=steps)
         .map(|k| {
             let t = k as f32 / steps as f32;
-            (t * total_ms, at(easing.ease(t)))
+            let share = easing.ease(t);
+            let (x, y) = at(share);
+            let bow = sag * 4.0 * share * (1.0 - share);
+            (t * total_ms, (x + nx * bow, y + ny * bow))
         })
         .collect()
 }
@@ -97,8 +127,20 @@ mod tests {
         let h = MouseEasing::Hand;
         assert_eq!(h.ease(0.0), 0.0);
         assert_eq!(h.ease(1.0), 1.0);
-        assert!(h.ease(0.3) > 0.55, "most of the way covered early");
+        assert!(h.ease(0.3) > 0.5, "half the way covered early");
         assert!(h.ease(0.75) < 0.95, "the last stretch takes its time");
+    }
+
+    #[test]
+    fn a_leftward_hand_stroke_sags_down_and_lands_on_target() {
+        let path = [(40.0, 10.0), (0.0, 10.0)];
+        let samples = timed_path(&path, MouseEasing::Hand, 300.0, 5.0);
+        let deepest = samples.iter().map(|(_, (_, y))| *y).fold(0.0f32, f32::max);
+        // 4% of 40 widths is 1.6 widths, or 0.8 rows.
+        assert!(deepest > 10.7, "the middle runs below the line: {deepest}");
+        assert_eq!(samples.last().unwrap().1, (0.0, 10.0));
+        let right = timed_path(&[(0.0, 10.0), (40.0, 10.0)], MouseEasing::Hand, 300.0, 5.0);
+        assert!(right.iter().all(|(_, (_, y))| *y == 10.0));
     }
 
     #[test]
