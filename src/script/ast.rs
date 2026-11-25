@@ -55,6 +55,10 @@ pub struct Settings {
     pub letter_spacing: f32,
     pub framerate: u32,
     pub playback_speed: f32,
+    /// How long before a click is sent the drawn pointer shows it pressed
+    /// (`Set ClickLead 40ms`). Zero draws the press with the event.
+    #[serde(default)]
+    pub click_lead: Duration,
     pub typing_speed: Duration,
     pub theme: Theme,
     pub cursor_blink: bool,
@@ -116,6 +120,7 @@ impl Default for Settings {
             letter_spacing: 1.0,
             framerate: 50,
             playback_speed: 1.0,
+            click_lead: Duration::ZERO,
             typing_speed: Duration::from_millis(50),
             theme: Theme::vhs_default(),
             cursor_blink: true,
@@ -135,6 +140,10 @@ pub enum Event {
     Type { text: String, delay: Duration },
     /// Sleep for `duration` without sending input.
     Sleep(Duration),
+    /// Move the timeline back by `duration`, so the steps after it overlap
+    /// the ones before, such as a pointer that starts its next move while a
+    /// scroll still slows down.
+    Back(Duration),
     /// Send a single key event (press/release), optionally repeated. `delay`
     /// is the gap between successive events when `count > 1`.
     Key {

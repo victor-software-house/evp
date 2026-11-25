@@ -226,6 +226,12 @@ fn parse_line(
                 .ok_or_else(|| anyhow!("Sleep needs a duration"))?;
             script.events.push(Event::Sleep(parse_duration(d)?));
         }
+        "Back" => {
+            let d = rest
+                .first()
+                .ok_or_else(|| anyhow!("Back needs a duration"))?;
+            script.events.push(Event::Back(parse_duration(d)?));
+        }
         "Hide" => script.events.push(Event::Hide),
         "Show" => script.events.push(Event::Show),
         "Screenshot" => {
@@ -515,6 +521,7 @@ fn apply_set(rest: &[String], s: &mut Settings) -> Result<()> {
         "BorderRadius" => s.border_radius = set_scalar_strict(rest, key)?.parse()?,
         "LineHeight" => s.line_height = set_scalar_strict(rest, key)?.parse()?,
         "Framerate" | "FrameRate" | "FPS" => s.framerate = set_scalar_strict(rest, key)?.parse()?,
+        "ClickLead" => s.click_lead = parse_duration(&set_scalar_strict(rest, key)?)?,
         "PlaybackSpeed" => s.playback_speed = set_scalar_strict(rest, key)?.parse()?,
         "TypingSpeed" => s.typing_speed = parse_duration(&set_scalar_strict(rest, key)?)?,
         "WaitTimeout" => s.wait_timeout = parse_duration(&set_scalar_strict(rest, key)?)?,
@@ -1140,6 +1147,14 @@ mod tests {
             format!("{err:#}").contains("cycle"),
             "expected cycle error, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn click_lead_defaults_to_zero_and_takes_a_duration() {
+        let s = parse("Output out.gif\n").expect("parse");
+        assert_eq!(s.settings.click_lead, Duration::ZERO);
+        let s = parse("Output out.gif\nSet ClickLead 40ms\n").expect("parse");
+        assert_eq!(s.settings.click_lead, Duration::from_millis(40));
     }
 
     #[test]
