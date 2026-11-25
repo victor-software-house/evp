@@ -257,6 +257,22 @@ mod tests {
         assert_ne!(font.glyph_id('✔').0, 0);
     }
 
+    #[test]
+    fn a_narrow_symbol_takes_a_text_face_before_the_emoji_face() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/NotoSansMonoCJKjp-Subset.otf"
+        );
+        let set = super::load_font_family(Some(path)).unwrap().font_set;
+        let family = |ch| &set.fonts[set.select_for_char(0, ch).0].family_name;
+        assert_eq!(family('🚀'), super::EMOJI_FAMILY);
+        let text_face = set.regular.iter().any(|i| {
+            set.fonts[*i].family_name != super::EMOJI_FAMILY
+                && super::has_glyph(set.fonts[*i].get_font(), '⏺')
+        });
+        assert_eq!(family('⏺') != super::EMOJI_FAMILY, text_face);
+    }
+
     use super::{FontInfo, SvgFontEmbeddingPolicy};
 
     #[test]
@@ -326,11 +342,24 @@ impl FontSet {
     /// Select the best `(font_index, &FontArc)` for `ch` given cell style flags.
     pub fn select_for_char(&self, flags: u8, ch: char) -> (usize, &FontArc) {
         let indices = self.indices_for_flags(flags);
+        // A one-cell character shows as text, as a terminal draws it: the
+        // emoji face draws it only when no text face after it has it, so
+        // U+23FA is a circle rather than its emoji button.
+        let text = unicode_width::UnicodeWidthChar::width(ch) == Some(1);
+        let mut emoji = None;
         for &idx in indices {
             let font = self.fonts[idx].get_font();
-            if has_glyph(font, ch) {
-                return (idx, font);
+            if !has_glyph(font, ch) {
+                continue;
             }
+            if text && self.fonts[idx].family_name == EMOJI_FAMILY {
+                emoji.get_or_insert((idx, font));
+                continue;
+            }
+            return (idx, font);
+        }
+        if let Some(found) = emoji {
+            return found;
         }
         let idx = indices[0];
         (idx, self.fonts[idx].get_font())
@@ -389,8 +418,12 @@ fn custom_face(bytes: Vec<u8>, family_name: &str, weight: &str) -> Result<FontIn
 }
 
 /// The system fonts a macOS terminal falls back to for symbols its font
-/// lacks, such as Menlo's flag (U+2691), in the order they are tried.
-const SYSTEM_FALLBACK_FAMILIES: &[&str] = &["Menlo", "Apple Symbols"];
+/// lacks, such as Menlo's flag (U+2691) or STIX Two Math's record circle
+/// (U+23FA), in the order they are tried.
+const SYSTEM_FALLBACK_FAMILIES: &[&str] = &["Menlo", "Apple Symbols", "STIX Two Math"];
+
+/// The embedded emoji face, which draws a symbol as its emoji.
+const EMOJI_FAMILY: &str = "Noto Emoji";
 
 /// The faces of `SYSTEM_FALLBACK_FAMILIES` installed on this machine. They
 /// come after the embedded fallbacks, so output is the same wherever the
