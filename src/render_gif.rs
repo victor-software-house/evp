@@ -870,8 +870,9 @@ fn rasterize_raw_frame_idx(
         let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
         let cy = (cfg.content_y as f32 + m_row * cell_h as f32 + cell_h as f32 / 2.0) as i32;
 
+        let press = curr.mouse_press.unwrap_or(1.0).clamp(0.0, 1.0);
         match m_state {
-            MouseState::Clicking => {
+            MouseState::Clicking if press > 0.0 => {
                 draw_circle_idx(
                     buf,
                     prev_buf,
@@ -882,7 +883,7 @@ fn rasterize_raw_frame_idx(
                     cy,
                     MOUSE_RIPPLE_CLICK_RADIUS,
                     [220, 220, 220],
-                    0.32,
+                    0.32 * press,
                     curr.default_bg,
                 );
             }
@@ -901,19 +902,19 @@ fn rasterize_raw_frame_idx(
                     curr.default_bg,
                 );
             }
-            MouseState::Moving => {}
+            MouseState::Clicking | MouseState::Moving => {}
         }
 
         let base = crate::pointer::scale_for_font(cfg.font_size_px);
         let reach = |n: i32| (n as f32 * base).ceil() as i32;
         for dy in crate::pointer::MIN..reach(crate::pointer::HEIGHT) {
             for dx in crate::pointer::MIN..reach(crate::pointer::WIDTH) {
-                let press = if m_state == MouseState::Clicking {
-                    0.82
+                let shrink = if m_state == MouseState::Clicking {
+                    1.0 - 0.18 * press
                 } else {
                     1.0
                 };
-                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * press);
+                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * shrink);
                 let px = cx + dx;
                 let py = cy + dy;
                 if alpha > 0.0

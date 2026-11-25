@@ -77,6 +77,10 @@ pub struct RawFrame {
     pub cursor_accent: Option<[u8; 3]>,
     #[serde(default)]
     pub mouse_cursor: Option<(f32, f32, MouseState)>,
+    /// How far a click has pressed the pointer while it is `Clicking`,
+    /// from 0 to 1. `None` presses it all the way for the whole click.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mouse_press: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<String>,
     /// The keys pressed last, shown as an overlay while they are recent.
@@ -105,6 +109,7 @@ impl RawFrame {
             && self.cursor_accent == other.cursor_accent
             && self.title == other.title
             && self.mouse_cursor == other.mouse_cursor
+            && self.mouse_press == other.mouse_press
             && self.key_cast == other.key_cast
             && self.cells == other.cells
     }
@@ -418,6 +423,7 @@ impl Recording {
             cursor_color,
             cursor_accent,
             mouse_cursor,
+            mouse_press: None,
             title,
             key_cast,
         })
