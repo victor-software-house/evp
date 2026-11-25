@@ -135,6 +135,10 @@ pub enum Event {
     Type { text: String, delay: Duration },
     /// Sleep for `duration` without sending input.
     Sleep(Duration),
+    /// Move the timeline back by `duration`, so the steps after it overlap
+    /// the ones before, such as a pointer that starts its next move while a
+    /// scroll still slows down.
+    Back(Duration),
     /// Send a single key event (press/release), optionally repeated. `delay`
     /// is the gap between successive events when `count > 1`.
     Key {

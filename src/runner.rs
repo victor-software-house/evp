@@ -172,6 +172,12 @@ pub struct MouseSegment {
     pub easing: Option<crate::hand::MouseEasing>,
 }
 
+/// How long before a click's press reaches the program the drawn pointer
+/// shows it pressed. A frame shows the terminal as the program drew it a
+/// little after the frame's time, so a press drawn at the event's own time
+/// shows after the change it causes.
+const PRESS_LEAD: Duration = Duration::from_millis(40);
+
 pub(crate) fn resolve_mouse_position(
     recorded_at: Duration,
     segments: &[MouseSegment],
@@ -180,9 +186,12 @@ pub(crate) fn resolve_mouse_position(
         return None;
     }
 
+    // A press starts before the segment that leads to it ends, so the
+    // segment that started last wins.
     let active = segments
         .iter()
-        .find(|s| s.start_time <= recorded_at && recorded_at <= s.end_time);
+        .filter(|s| s.start_time <= recorded_at && recorded_at <= s.end_time)
+        .max_by_key(|s| s.start_time);
     if let Some(s) = active {
         let duration = s.end_time.saturating_sub(s.start_time);
         if duration == Duration::ZERO {
@@ -722,6 +731,7 @@ pub(crate) fn build_timeline(
                 }
             }
             Event::Sleep(d) => cursor += scale(*d),
+            Event::Back(d) => cursor = cursor.saturating_sub(scale(*d)),
             Event::Key {
                 key,
                 action,
@@ -752,7 +762,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor,
+                    start_time: cursor.saturating_sub(PRESS_LEAD),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
@@ -793,7 +803,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor,
+                    start_time: cursor.saturating_sub(PRESS_LEAD),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
@@ -834,7 +844,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor,
+                    start_time: cursor.saturating_sub(PRESS_LEAD),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
@@ -1137,7 +1147,14 @@ pub(crate) fn build_timeline(
             }),
         }
     }
-    (out, mouse_segments, cursor)
+    // A `Back` leaves events out of order; the run takes them by time.
+    out.sort_by_key(|s: &Scheduled| s.at);
+    let end = out
+        .iter()
+        .map(|s| s.at)
+        .chain(mouse_segments.iter().map(|s: &MouseSegment| s.end_time))
+        .fold(cursor, Duration::max);
+    (out, mouse_segments, end)
 }
 
 fn generate_spline_points_f32(coords: &[(u16, u16)]) -> Vec<(f32, f32)> {
@@ -1257,7 +1274,7 @@ fn execute_event(
                 pty.write(b" ");
             }
         }
-        Event::Sleep(_) => {
+        Event::Sleep(_) | Event::Back(_) => {
             // Sleep is materialised as a gap in the timeline; nothing to do
             // when we hit the (zero‑width) marker.
         }
@@ -2207,6 +2224,30 @@ mod tests {
                 .contains("key event likely requires kitty extended keyboard protocol"),
             "expected kitty warning to be emitted"
         );
+    }
+
+    #[test]
+    fn back_overlaps_the_next_steps_with_the_ones_before() {
+        let enter = Event::Key {
+            key: KeySpec {
+                key: NamedKey::Enter,
+                mods: ModSet::NONE,
+            },
+            action: KeyAction::Press,
+            count: 1,
+            delay: Duration::ZERO,
+        };
+        let events = vec![
+            Event::Sleep(Duration::from_millis(100)),
+            enter.clone(),
+            Event::Back(Duration::from_millis(60)),
+            enter,
+        ];
+
+        let (timeline, _, end) = build_timeline(&events, &Settings::default());
+        let at: Vec<Duration> = timeline.iter().map(|s| s.at).collect();
+        assert_eq!(at, [Duration::from_millis(40), Duration::from_millis(100)]);
+        assert_eq!(end, Duration::from_millis(100));
     }
 
     #[test]

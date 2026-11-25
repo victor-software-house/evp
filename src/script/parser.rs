@@ -226,6 +226,12 @@ fn parse_line(
                 .ok_or_else(|| anyhow!("Sleep needs a duration"))?;
             script.events.push(Event::Sleep(parse_duration(d)?));
         }
+        "Back" => {
+            let d = rest
+                .first()
+                .ok_or_else(|| anyhow!("Back needs a duration"))?;
+            script.events.push(Event::Back(parse_duration(d)?));
+        }
         "Hide" => script.events.push(Event::Hide),
         "Show" => script.events.push(Event::Show),
         "Screenshot" => {
