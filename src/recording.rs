@@ -81,6 +81,10 @@ pub struct RawFrame {
     /// from 0 to 1. `None` presses it all the way for the whole click.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mouse_press: Option<f32>,
+    /// A ripple spreading from where a led click was sent: its (col, row)
+    /// and how far it has spread, from 0 to 1.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mouse_ripple: Option<(f32, f32, f32)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<String>,
     /// The keys pressed last, shown as an overlay while they are recent.
@@ -110,6 +114,7 @@ impl RawFrame {
             && self.title == other.title
             && self.mouse_cursor == other.mouse_cursor
             && self.mouse_press == other.mouse_press
+            && self.mouse_ripple == other.mouse_ripple
             && self.key_cast == other.key_cast
             && self.cells == other.cells
     }
@@ -424,6 +429,7 @@ impl Recording {
             cursor_accent,
             mouse_cursor,
             mouse_press: None,
+            mouse_ripple: None,
             title,
             key_cast,
         })

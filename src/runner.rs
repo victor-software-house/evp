@@ -207,6 +207,23 @@ pub(crate) fn press_amount(recorded_at: Duration, segments: &[MouseSegment]) -> 
     Some(1.0 - smooth(recorded_at.saturating_sub(up).as_secs_f32() / rest))
 }
 
+/// How long a led click's ripple takes to spread and fade.
+pub(crate) const RIPPLE: Duration = Duration::from_millis(520);
+
+/// The ripple of the latest led click sent within [`RIPPLE`] before
+/// `recorded_at`: where it was sent and how far the ripple has spread.
+pub(crate) fn ripple_at(recorded_at: Duration, segments: &[MouseSegment]) -> Option<(f32, f32, f32)> {
+    segments
+        .iter()
+        .filter_map(|s| s.press_at.map(|at| (at, s)))
+        .filter(|(at, _)| *at <= recorded_at && recorded_at < *at + RIPPLE)
+        .max_by_key(|(at, _)| *at)
+        .map(|(at, s)| {
+            let age = (recorded_at - at).as_secs_f32() / RIPPLE.as_secs_f32();
+            (s.end_col, s.end_row, age)
+        })
+}
+
 pub(crate) fn resolve_mouse_position(
     recorded_at: Duration,
     segments: &[MouseSegment],
@@ -522,6 +539,8 @@ pub fn run_with_raw_frame_consumers(
                     );
                     frame.mouse_press =
                         press_amount(next_frame_at.saturating_sub(wait_delay), &mouse_segments);
+                    frame.mouse_ripple =
+                        ripple_at(next_frame_at.saturating_sub(wait_delay), &mouse_segments);
                     frame.key_cast = key_cast.at(recorded_at);
                     if !pending_screenshots.is_empty() {
                         let shots = std::mem::take(&mut pending_screenshots);
@@ -1780,6 +1799,7 @@ pub fn capture<'a>(
             cursor_accent,
             mouse_cursor: None,
             mouse_press: None,
+            mouse_ripple: None,
             title,
             key_cast: None,
         },
@@ -2283,6 +2303,11 @@ mod tests {
         assert!((at(120) - 1.0).abs() < 1e-6);
         assert!(at(170) < 0.01);
         assert_eq!(super::press_amount(ms(200), &segs), None);
+        let (_, _, start) = super::ripple_at(ms(100), &segs).expect("sent");
+        let (_, _, later) = super::ripple_at(ms(300), &segs).expect("spreading");
+        assert!(start == 0.0 && later > start && later < 1.0);
+        assert_eq!(super::ripple_at(ms(99), &segs), None);
+        assert_eq!(super::ripple_at(ms(100) + super::RIPPLE, &segs), None);
     }
 
     #[test]
