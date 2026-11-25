@@ -42,6 +42,11 @@ pub struct ViewportConfig {
     pub ascent_px: u32,
     /// Additive pixels added to each cell's width.
     pub letter_spacing: f32,
+    /// How large the key overlay is drawn, as a multiple of its usual size.
+    pub key_cast_scale: f32,
+    /// How many rows above the grid's bottom edge the key overlay's bottom
+    /// edge sits.
+    pub key_cast_rise: f32,
 }
 
 /// Returns `true` if the character is a box drawing character.
@@ -112,6 +117,8 @@ impl ViewportConfig {
             char_height_px,
             ascent_px,
             letter_spacing,
+            key_cast_scale: 1.0,
+            key_cast_rise: 3.6,
         }
     }
 }

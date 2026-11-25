@@ -959,14 +959,15 @@ struct PillBox {
     h: f32,
 }
 
-/// Where the key overlay sits: centred, just above the bottom three rows,
-/// where a TUI often keeps its input line.
+/// Where the key overlay sits: centred, `key_cast_rise` rows above the
+/// grid's bottom, by default just above the bottom three rows, where a TUI
+/// often keeps its input line.
 fn key_pill_box(
     cast: &crate::recording::KeyCast,
     font_set: &FontSet,
     cfg: ViewportConfig,
 ) -> (PillBox, PxScale) {
-    let fs = cfg.font_size_px;
+    let fs = cfg.font_size_px * cfg.key_cast_scale;
     let scale = PxScale::from(fs * 1.2);
     let text_w = string_width(&cast.label, font_set, scale);
     let h = (fs * 2.4).round();
@@ -974,7 +975,7 @@ fn key_pill_box(
     let content_w = cfg.cols as f32 * cfg.cell_width_px as f32;
     let content_bottom = cfg.content_y as f32 + cfg.rows as f32 * cfg.cell_height_px as f32;
     let x = (cfg.content_x as f32 + (content_w - w) / 2.0).round();
-    let y = (content_bottom - 3.6 * cfg.cell_height_px as f32 - h).round();
+    let y = (content_bottom - cfg.key_cast_rise * cfg.cell_height_px as f32 - h).round();
     (PillBox { x, y, w, h }, scale)
 }
 

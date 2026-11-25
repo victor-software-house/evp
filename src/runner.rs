@@ -146,7 +146,7 @@ pub fn derive_options(s: &Settings) -> ViewportConfig {
     let rows = s
         .rows
         .unwrap_or_else(|| (inner_h / cell_h_px).max(2) as u16);
-    ViewportConfig::new(
+    let mut cfg = ViewportConfig::new(
         cols,
         rows,
         s.framerate,
@@ -157,7 +157,14 @@ pub fn derive_options(s: &Settings) -> ViewportConfig {
         char_height_px,
         ascent_px,
         s.letter_spacing,
-    )
+    );
+    if let Some(scale) = s.key_cast_scale {
+        cfg.key_cast_scale = scale;
+    }
+    if let Some(rise) = s.key_cast_rise {
+        cfg.key_cast_rise = rise;
+    }
+    cfg
 }
 
 #[derive(Clone, Debug)]

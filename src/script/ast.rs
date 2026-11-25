@@ -59,6 +59,14 @@ pub struct Settings {
     /// (`Set ClickLead 40ms`). Zero draws the press with the event.
     #[serde(default)]
     pub click_lead: Duration,
+    /// The key overlay's size as a multiple of its usual size
+    /// (`Set KeyCastScale 1.5`); unset draws it at 1.
+    #[serde(default)]
+    pub key_cast_scale: Option<f32>,
+    /// How many rows above the grid's bottom the key overlay sits
+    /// (`Set KeyCastRise 10`); unset puts it just above the bottom three rows.
+    #[serde(default)]
+    pub key_cast_rise: Option<f32>,
     pub typing_speed: Duration,
     pub theme: Theme,
     pub cursor_blink: bool,
@@ -121,6 +129,8 @@ impl Default for Settings {
             framerate: 50,
             playback_speed: 1.0,
             click_lead: Duration::ZERO,
+            key_cast_scale: None,
+            key_cast_rise: None,
             typing_speed: Duration::from_millis(50),
             theme: Theme::vhs_default(),
             cursor_blink: true,
