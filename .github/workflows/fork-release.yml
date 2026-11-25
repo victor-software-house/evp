@@ -1,0 +1,81 @@
+name: Fork release
+
+# Builds the fork's evp binary on a GitHub-hosted macOS runner and publishes it
+# with verctl as the vendored set in .ctl/ver.yaml. The push to downstream that
+# changes the set's version releases it. A dispatch from another branch builds,
+# renders and packs without uploading, because a release asset is never
+# replaced. The inherited release.yml runs only on upstream's v*.*.* tags.
+on:
+  push:
+    branches: [downstream]
+    paths:
+      - .ctl/ver.yaml
+      - .github/workflows/fork-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: victor-software-house/actions/mise@f52f847fd81923dd9f5fb57c8433abf06dc33f8b # main, 2026-11-25
+        with:
+          version: 2026.11.12
+          install_args: github:victor-software-house/verctl@0.8.6-rc.8
+      - name: Plan the targets
+        id: plan
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: "false"
+          VERCTL_VENDORED: evp
+        run: mise run ver status --github-output "${GITHUB_OUTPUT}"
+
+  build:
+    needs: plan
+    name: ${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 60
+    permissions:
+      # verctl creates the release and uploads the archive and its checksum.
+      contents: write
+    env:
+      # Zig 0.15.2 cannot link its build runner against the macOS 26 SDK.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      TARGET: ${{ matrix.id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # vergen reads the history for evp --version.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: victor-software-house/actions/mise@f52f847fd81923dd9f5fb57c8433abf06dc33f8b # main, 2026-11-25
+        with:
+          version: 2026.11.12
+          install_args: rust zig github:victor-software-house/verctl@0.8.6-rc.8
+      - name: Build
+        run: mise run evp:build "${TARGET}"
+      - name: Render the quickstart tape
+        working-directory: ${{ runner.temp }}
+        run: '"${GITHUB_WORKSPACE}/target/dist/${TARGET}/evp" "${GITHUB_WORKSPACE}/examples/quickstart.tape"'
+      - name: Pack and upload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERCTL_VENDORED: evp
+          VERCTL_TARGET: ${{ matrix.id }}
+          VERCTL_DRY_RUN: ${{ github.ref != 'refs/heads/downstream' && 'true' || '' }}
+        run: mise run ver release asset

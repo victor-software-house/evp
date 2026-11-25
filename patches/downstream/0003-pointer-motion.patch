@@ -1,0 +1,516 @@
+pointer-motion
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Move the pointer along its easing in time instead of along the inverse of it, add a Hand easing measured from real pointing strokes, and keep the drawn pointer on the events' clock after a Wait.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp samples pointer moves by time and keeps the drawn pointer on the event clock after a Wait.
+---
+ src/hand.rs          |  168 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/lib.rs           |    1 
+ src/record.rs        |    6 +-
+ src/runner.rs        |   69 ++++++++++++---------
+ src/script/ast.rs    |    5 +
+ src/script/mod.rs    |   10 ++-
+ src/script/parser.rs |   23 +++++--
+ 7 files changed, 239 insertions(+), 43 deletions(-)
+ create mode 100644 src/hand.rs
+
+diff --git a/src/hand.rs b/src/hand.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa8127072d754efb9946666f1d19c2aae0009c08
+--- /dev/null
++++ b/src/hand.rs
+@@ -0,0 +1,168 @@
++//! Mouse easings: the standard curves, plus one measured from a person's hand.
++
++use easing_function::Easing;
++use easing_function::easings::StandardEasing;
++use serde::{Deserialize, Serialize};
++
++/// How a move's covered share of its path grows with elapsed time.
++#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
++pub enum MouseEasing {
++    Standard(StandardEasing),
++    /// A hand's pointing stroke: a fast launch that peaks a quarter of the way
++    /// in, then a long homing approach to the target.
++    Hand,
++}
++
++/// The share of the path a hand has covered at each fortieth of the move,
++/// averaged over 84 clean pointing strokes captured at about 200 Hz.
++const HAND: [f32; 41] = [
++    0.0, 0.023, 0.058, 0.105, 0.155, 0.208, 0.26, 0.313, 0.361, 0.409, 0.453, 0.495, 0.532, 0.569,
++    0.606, 0.643, 0.676, 0.707, 0.734, 0.759, 0.783, 0.804, 0.823, 0.84, 0.857, 0.874, 0.887,
++    0.901, 0.913, 0.925, 0.935, 0.944, 0.953, 0.961, 0.968, 0.974, 0.98, 0.985, 0.99, 0.995, 1.0,
++];
++
++/// A leftward stroke sags downward by about this share of its length at its
++/// middle; other directions run straight.
++const LEFTWARD_SAG: f32 = 0.04;
++
++/// A terminal cell is about twice as tall as it is wide, so a path in cells
++/// is measured in widths.
++const CELL_ASPECT: f32 = 2.0;
++
++impl MouseEasing {
++    pub fn ease(self, t: f32) -> f32 {
++        match self {
++            MouseEasing::Standard(e) => e.ease(t),
++            MouseEasing::Hand => {
++                let x = t.clamp(0.0, 1.0) * (HAND.len() - 1) as f32;
++                let i = (x as usize).min(HAND.len() - 2);
++                HAND[i] + (HAND[i + 1] - HAND[i]) * (x - i as f32)
++            }
++        }
++    }
++}
++
++impl From<StandardEasing> for MouseEasing {
++    fn from(e: StandardEasing) -> Self {
++        MouseEasing::Standard(e)
++    }
++}
++
++impl Default for MouseEasing {
++    fn default() -> Self {
++        MouseEasing::Standard(StandardEasing::InOutCubic)
++    }
++}
++
++/// Positions along `points` at even steps of `step_ms`, each at the share of
++/// the path's length the easing gives for that time. A share past either end
++/// continues along the end segment, so an overshooting easing overshoots.
++pub fn timed_path(
++    points: &[(f32, f32)],
++    easing: MouseEasing,
++    total_ms: f32,
++    step_ms: f32,
++) -> Vec<(f32, (f32, f32))> {
++    if points.len() < 2 || total_ms <= 0.0 {
++        return points.iter().map(|&p| (total_ms.max(0.0), p)).collect();
++    }
++    let mut lengths = vec![0.0f32];
++    for w in points.windows(2) {
++        let d = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
++        lengths.push(lengths.last().copied().unwrap_or(0.0) + d);
++    }
++    let total_len = lengths.last().copied().unwrap_or(0.0);
++    let at = |share: f32| -> (f32, f32) {
++        if total_len == 0.0 {
++            return points[0];
++        }
++        let target = share * total_len;
++        let i = match lengths.iter().position(|&l| l >= target) {
++            Some(0) => 1,
++            Some(i) => i,
++            None => lengths.len() - 1,
++        };
++        let (a, b) = (points[i - 1], points[i]);
++        let seg = (lengths[i] - lengths[i - 1]).max(f32::EPSILON);
++        let f = (target - lengths[i - 1]) / seg;
++        (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
++    };
++    // A hand's leftward stroke bows downward, most at its middle.
++    let (first, last) = (points[0], points[points.len() - 1]);
++    let (dx, dy) = (last.0 - first.0, (last.1 - first.1) * CELL_ASPECT);
++    let span = (dx * dx + dy * dy).sqrt();
++    let sag = if easing == MouseEasing::Hand && dx < 0.0 && span > 0.0 {
++        LEFTWARD_SAG * span
++    } else {
++        0.0
++    };
++    // The unit normal that points down the screen, in cell units.
++    let (nx, ny) = if span > 0.0 {
++        let (mut nx, mut ny) = (-dy / span, dx / span);
++        if ny < 0.0 {
++            (nx, ny) = (-nx, -ny);
++        }
++        (nx, ny / CELL_ASPECT)
++    } else {
++        (0.0, 0.0)
++    };
++    let steps = (total_ms / step_ms).ceil().max(1.0) as usize;
++    (0..=steps)
++        .map(|k| {
++            let t = k as f32 / steps as f32;
++            let share = easing.ease(t);
++            let (x, y) = at(share);
++            let bow = sag * 4.0 * share * (1.0 - share);
++            (t * total_ms, (x + nx * bow, y + ny * bow))
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn hand_launches_fast_and_homes_in_slowly() {
++        let h = MouseEasing::Hand;
++        assert_eq!(h.ease(0.0), 0.0);
++        assert_eq!(h.ease(1.0), 1.0);
++        assert!(h.ease(0.3) > 0.5, "half the way covered early");
++        assert!(h.ease(0.75) < 0.95, "the last stretch takes its time");
++    }
++
++    #[test]
++    fn a_leftward_hand_stroke_sags_down_and_lands_on_target() {
++        let path = [(40.0, 10.0), (0.0, 10.0)];
++        let samples = timed_path(&path, MouseEasing::Hand, 300.0, 5.0);
++        let deepest = samples.iter().map(|(_, (_, y))| *y).fold(0.0f32, f32::max);
++        // 4% of 40 widths is 1.6 widths, or 0.8 rows.
++        assert!(deepest > 10.7, "the middle runs below the line: {deepest}");
++        assert_eq!(samples.last().unwrap().1, (0.0, 10.0));
++        let right = timed_path(&[(0.0, 10.0), (40.0, 10.0)], MouseEasing::Hand, 300.0, 5.0);
++        assert!(right.iter().all(|(_, (_, y))| *y == 10.0));
++    }
++
++    #[test]
++    fn position_follows_the_easing_in_time() {
++        let path = [(0.0, 0.0), (10.0, 0.0)];
++        let samples = timed_path(
++            &path,
++            MouseEasing::Standard(StandardEasing::Linear),
++            100.0,
++            25.0,
++        );
++        let xs: Vec<f32> = samples.iter().map(|(_, (x, _))| *x).collect();
++        assert_eq!(xs, vec![0.0, 2.5, 5.0, 7.5, 10.0]);
++        let quad = timed_path(
++            &path,
++            MouseEasing::Standard(StandardEasing::InQuadradic),
++            100.0,
++            50.0,
++        );
++        assert!(
++            (quad[1].1.0 - 2.5).abs() < 1e-4,
++            "half the time covers a quarter"
++        );
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index d5459cba115087e093a63970dc75347fed19c7ea..b95e094abb8e02ad13c1d0a44fb01503733ffd88 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -28,6 +28,7 @@
+ 
+ pub mod font;
+ pub mod full_recording;
++pub mod hand;
+ pub mod keys;
+ mod pointer;
+ pub mod pty;
+diff --git a/src/record.rs b/src/record.rs
+index c7ecf9633a4cfa5a91b34a3ded0d33588b95ff44..ea2a6b8aba53617098890bef636ea8b003c89d65 100644
+--- a/src/record.rs
++++ b/src/record.rs
+@@ -709,14 +709,14 @@ impl MouseSegmentTracker {
+                 coords,
+                 mods: self.mods,
+                 delay,
+-                easing: Some(best_easing),
++                easing: Some(best_easing.into()),
+             })
+         } else {
+             Some(Event::MouseMove {
+                 coords,
+                 mods: self.mods,
+                 delay,
+-                easing: Some(best_easing),
++                easing: Some(best_easing.into()),
+             })
+         };
+ 
+@@ -1368,7 +1368,7 @@ pub fn record(
+                                                                     coords: vec![(drag_start_col, drag_start_row), (col, pty_row)],
+                                                                     mods: ev_mods,
+                                                                     delay: Duration::from_millis(50),
+-                                                                    easing: Some(StandardEasing::InOutElastic),
++                                                                    easing: Some(crate::hand::MouseEasing::Standard(StandardEasing::InOutElastic)),
+                                                                 });
+                                                             }
+                                                         } else if button == Some(MouseButton::Right) {
+diff --git a/src/runner.rs b/src/runner.rs
+index 72da61c8896af9743e2c243b35420b4483b00f06..c5c4f4236131904cc5d133db62c287eda445ee42 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -15,7 +15,6 @@
+ //! (event or frame) using `poll(2)` on the PTY fd so any incoming output
+ //! also wakes us early.
+ 
+-use easing_function::easings::StandardEasing;
+ use std::path::PathBuf;
+ use std::time::{Duration, Instant};
+ 
+@@ -170,7 +169,7 @@ pub struct MouseSegment {
+     pub end_col: f32,
+     pub end_row: f32,
+     pub state: crate::recording::MouseState,
+-    pub easing: Option<StandardEasing>,
++    pub easing: Option<crate::hand::MouseEasing>,
+ }
+ 
+ pub(crate) fn resolve_mouse_position(
+@@ -193,9 +192,7 @@ pub(crate) fn resolve_mouse_position(
+         let f = elapsed.as_secs_f32() / duration.as_secs_f32();
+         let f = f.clamp(0.0, 1.0);
+ 
+-        use easing_function::Easing;
+-        let easing = s.easing.unwrap_or(StandardEasing::InOutCubic);
+-        let f_eased = easing.ease(f);
++        let f_eased = s.easing.unwrap_or_default().ease(f);
+ 
+         let col = s.start_col + f_eased * (s.end_col - s.start_col);
+         let row = s.start_row + f_eased * (s.end_row - s.start_row);
+@@ -336,6 +333,9 @@ pub fn run_with_raw_frame_consumers(
+     let mut hidden = false;
+     let mut hidden_started_at: Option<Duration> = None;
+     let mut skipped_recording_time = Duration::ZERO;
++    // How long `Wait`s have held the timeline back. Every event after a
++    // wait, and the pointer drawn with them, moves later by this much.
++    let mut wait_delay = Duration::ZERO;
+     let mut clipboard = String::new();
+     let mut pending_screenshots: Vec<PathBuf> = Vec::new();
+ 
+@@ -393,10 +393,12 @@ pub fn run_with_raw_frame_consumers(
+                 // before the run) would be in the past and the loop would
+                 // exit before the post-Wait tail (e.g. a `Sleep`) is shown.
+                 total_duration += now.saturating_sub(w.started_at);
++                wait_delay += now.saturating_sub(w.started_at);
+                 wait_state = None;
+             } else if now >= w.deadline {
+                 warn!(pattern = %w.pattern, "wait timed out");
+                 total_duration += now.saturating_sub(w.started_at);
++                wait_delay += now.saturating_sub(w.started_at);
+                 wait_state = None;
+             }
+         }
+@@ -405,9 +407,9 @@ pub fn run_with_raw_frame_consumers(
+         loop {
+             let next_event_at = if wait_state.is_none()
+                 && event_idx < timeline.len()
+-                && timeline[event_idx].at <= now
++                && timeline[event_idx].at + wait_delay <= now
+             {
+-                Some(timeline[event_idx].at)
++                Some(timeline[event_idx].at + wait_delay)
+             } else {
+                 None
+             };
+@@ -473,7 +475,12 @@ pub fn run_with_raw_frame_consumers(
+                         &mut prev_cursor_pos,
+                         script.settings.theme.cursor_accent_rgb().ok().flatten(),
+                     )?;
+-                    frame.mouse_cursor = resolve_mouse_position(recorded_at, &mouse_segments);
++                    // The pointer's segments are on the script's timeline,
++                    // which waits push back; the frame's own time is not.
++                    frame.mouse_cursor = resolve_mouse_position(
++                        next_frame_at.saturating_sub(wait_delay),
++                        &mouse_segments,
++                    );
+                     if !pending_screenshots.is_empty() {
+                         let shots = std::mem::take(&mut pending_screenshots);
+                         for path in shots {
+@@ -925,16 +932,19 @@ pub(crate) fn build_timeline(
+                     };
+                     let start_cursor = cursor;
+ 
+-                    use easing_function::Easing;
+-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
+-
+-                    let mut times = Vec::with_capacity(points.len());
+-                    for j in 0..points.len() {
+-                        let f = j as f32 / (points.len() - 1) as f32;
+-                        let f_eased = ease_func.ease(f);
+-                        let t_offset = total_dur.mul_f32(f_eased);
+-                        times.push(start_cursor + t_offset);
+-                    }
++                    // Sample even times; the easing gives the share of the
++                    // path covered at each, so position follows the curve.
++                    let timed = crate::hand::timed_path(
++                        &points,
++                        easing.unwrap_or_default(),
++                        total_dur.as_secs_f32() * 1000.0,
++                        5.0,
++                    );
++                    let points: Vec<(f32, f32)> = timed.iter().map(|(_, p)| *p).collect();
++                    let times: Vec<Duration> = timed
++                        .iter()
++                        .map(|(ms, _)| start_cursor + Duration::from_secs_f32(ms / 1000.0))
++                        .collect();
+ 
+                     let (x0, y0) = points[0];
+                     let col0 = x0.round() as u16;
+@@ -1039,16 +1049,19 @@ pub(crate) fn build_timeline(
+                     };
+                     let start_cursor = cursor;
+ 
+-                    use easing_function::Easing;
+-                    let ease_func = easing.unwrap_or(StandardEasing::InOutCubic);
+-
+-                    let mut times = Vec::with_capacity(points.len());
+-                    for j in 0..points.len() {
+-                        let f = j as f32 / (points.len() - 1) as f32;
+-                        let f_eased = ease_func.ease(f);
+-                        let t_offset = total_dur.mul_f32(f_eased);
+-                        times.push(start_cursor + t_offset);
+-                    }
++                    // Sample even times; the easing gives the share of the
++                    // path covered at each, so position follows the curve.
++                    let timed = crate::hand::timed_path(
++                        &points,
++                        easing.unwrap_or_default(),
++                        total_dur.as_secs_f32() * 1000.0,
++                        5.0,
++                    );
++                    let points: Vec<(f32, f32)> = timed.iter().map(|(_, p)| *p).collect();
++                    let times: Vec<Duration> = timed
++                        .iter()
++                        .map(|(ms, _)| start_cursor + Duration::from_secs_f32(ms / 1000.0))
++                        .collect();
+ 
+                     let (x0, y0) = points[0];
+                     let col0 = x0.round() as u16;
+diff --git a/src/script/ast.rs b/src/script/ast.rs
+index bd3b9679a84927c7c0c347de1dcbee681d96406c..8c4283d98413d2d0c5d3bd3284ffa2d4e863619f 100644
+--- a/src/script/ast.rs
++++ b/src/script/ast.rs
+@@ -12,7 +12,6 @@
+ 
+ use std::time::Duration;
+ 
+-use easing_function::easings::StandardEasing;
+ use serde::{Deserialize, Serialize};
+ 
+ use crate::{FrameStyle, Theme, WindowBarStyle};
+@@ -188,14 +187,14 @@ pub enum Event {
+         coords: Vec<(u16, u16)>,
+         mods: ModSet,
+         delay: Duration,
+-        easing: Option<StandardEasing>,
++        easing: Option<crate::hand::MouseEasing>,
+     },
+     /// Move mouse without pressing any buttons.
+     MouseMove {
+         coords: Vec<(u16, u16)>,
+         mods: ModSet,
+         delay: Duration,
+-        easing: Option<StandardEasing>,
++        easing: Option<crate::hand::MouseEasing>,
+     },
+     /// Scroll mouse wheel.
+     MouseScroll {
+diff --git a/src/script/mod.rs b/src/script/mod.rs
+index c25676084fd3f9691986a20865421fc1660751e9..3b3d9a1f75bcfaaf1d4001e134b4e36e6765eec1 100644
+--- a/src/script/mod.rs
++++ b/src/script/mod.rs
+@@ -27,13 +27,19 @@ pub fn write_reference_header() -> String {
+     header
+ }
+ 
+-fn format_mouse_cmd(name: &str, delay: Duration, easing: Option<StandardEasing>) -> String {
++fn format_mouse_cmd(
++    name: &str,
++    delay: Duration,
++    easing: Option<crate::hand::MouseEasing>,
++) -> String {
+     let mut cmd = name.to_string();
+     let has_delay = delay != Duration::from_millis(50);
+     if has_delay {
+         cmd.push_str(&format!("@{}ms", delay.as_millis()));
+     }
+-    if let Some(e) = easing {
++    if let Some(crate::hand::MouseEasing::Hand) = easing {
++        cmd.push_str("@Hand");
++    } else if let Some(crate::hand::MouseEasing::Standard(e)) = easing {
+         let easing_name = match e {
+             StandardEasing::Linear => "Linear",
+             StandardEasing::InSine => "EaseInSine",
+diff --git a/src/script/parser.rs b/src/script/parser.rs
+index db219d9433ab2571b8deafce8e7f2db7db73b0e4..daa2e33f93880ee605b57083c50a8390c716a9fe 100644
+--- a/src/script/parser.rs
++++ b/src/script/parser.rs
+@@ -5,6 +5,7 @@
+ //! line into tokens (whitespace separated, with `"…"` / `'…'` / `` `…` ``
+ //! quoted strings preserved verbatim) then dispatch on the first token.
+ 
++use crate::hand::MouseEasing;
+ use easing_function::easings::StandardEasing;
+ use std::collections::HashSet;
+ use std::path::{Path, PathBuf};
+@@ -798,6 +799,14 @@ fn parse_explicit_key_action(tokens: &[String], action: KeyAction) -> Result<Eve
+     })
+ }
+ 
++/// A mouse easing name: `Hand`, the measured pointing stroke, or a standard curve.
++fn parse_mouse_easing(name: &str) -> Result<MouseEasing> {
++    if name.eq_ignore_ascii_case("hand") {
++        return Ok(MouseEasing::Hand);
++    }
++    parse_easing(name).map(MouseEasing::Standard)
++}
++
+ fn parse_easing(name: &str) -> Result<StandardEasing> {
+     match name
+         .to_ascii_lowercase()
+@@ -844,7 +853,7 @@ fn parse_mouse_config(
+     head: &str,
+     prefix: &str,
+     default_delay: Duration,
+-) -> Result<(Duration, Option<StandardEasing>)> {
++) -> Result<(Duration, Option<MouseEasing>)> {
+     let parts = head
+         .strip_prefix(prefix)
+         .and_then(|s| s.strip_prefix('@'))
+@@ -858,7 +867,7 @@ fn parse_mouse_config(
+     match sub_parts.len() {
+         1 => {
+             let token = sub_parts[0];
+-            if let Ok(easing) = parse_easing(token) {
++            if let Ok(easing) = parse_mouse_easing(token) {
+                 Ok((default_delay, Some(easing)))
+             } else {
+                 let delay = parse_duration(token)?;
+@@ -867,7 +876,7 @@ fn parse_mouse_config(
+         }
+         2 => {
+             let delay = parse_duration(sub_parts[0])?;
+-            let easing = parse_easing(sub_parts[1])?;
++            let easing = parse_mouse_easing(sub_parts[1])?;
+             Ok((delay, Some(easing)))
+         }
+         _ => bail!("Invalid mouse configuration syntax on {}: {}", prefix, head),
+@@ -1409,11 +1418,11 @@ mod tests {
+         assert_eq!(s_easing.events.len(), 2);
+         assert!(matches!(
+             &s_easing.events[0],
+-            Event::MouseMove { coords, delay, easing: Some(StandardEasing::InOutElastic), .. } if *delay == Duration::from_millis(100) && coords == &vec![(10, 10), (20, 20)]
++            Event::MouseMove { coords, delay, easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)), .. } if *delay == Duration::from_millis(100) && coords == &vec![(10, 10), (20, 20)]
+         ));
+         assert!(matches!(
+             &s_easing.events[1],
+-            Event::MouseDrag { coords, delay, easing: Some(StandardEasing::InOutQuadradic), .. } if *delay == Duration::from_millis(50) && coords == &vec![(30, 30), (40, 40)]
++            Event::MouseDrag { coords, delay, easing: Some(MouseEasing::Standard(StandardEasing::InOutQuadradic)), .. } if *delay == Duration::from_millis(50) && coords == &vec![(30, 30), (40, 40)]
+         ));
+     }
+ 
+@@ -1495,7 +1504,7 @@ mod tests {
+                     ..ModSet::default()
+                 },
+                 delay: Duration::from_millis(50),
+-                easing: Some(StandardEasing::InOutElastic),
++                easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)),
+             },
+             Event::MouseScroll {
+                 col: 9,
+@@ -1612,7 +1621,7 @@ mod tests {
+             Event::MouseMove {
+                 coords,
+                 mods,
+-                easing: Some(StandardEasing::InOutElastic),
++                easing: Some(MouseEasing::Standard(StandardEasing::InOutElastic)),
+                 ..
+             } if mods.alt && !mods.ctrl && coords == &vec![(5, 6), (7, 8)]
+         ));

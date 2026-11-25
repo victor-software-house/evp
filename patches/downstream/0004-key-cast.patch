@@ -1,0 +1,678 @@
+key-cast
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Show the latest burst of keys as a pill above the bottom rows of a GIF that fades after the last key, and let a theme list all 256 indexed colours, so a terminal that derives 16 to 255 from its theme renders as it does there.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp shows the keys pressed in a recording and reads a theme's full 256-colour palette.
+---
+ src/bin/evp.rs    |    1 
+ src/keycast.rs    |  152 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/lib.rs        |    1 
+ src/recording.rs  |   26 +++++++++
+ src/render_gif.rs |  161 ++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/render_svg.rs |    1 
+ src/runner.rs     |   13 ++++
+ src/style.rs      |   23 ++++++++
+ 8 files changed, 367 insertions(+), 11 deletions(-)
+ create mode 100644 src/keycast.rs
+
+diff --git a/src/bin/evp.rs b/src/bin/evp.rs
+index 4e3aa36e7b13e7eb96c5293c58bc2e3479898b4f..bf33845c263f77d69f839abc5d30436e0c67628b 100644
+--- a/src/bin/evp.rs
++++ b/src/bin/evp.rs
+@@ -678,6 +678,7 @@ mod tests {
+                 cursor_accent: None,
+                 mouse_cursor: None,
+                 title: None,
++                key_cast: None,
+                 cells: vec![blank; 80 * 24],
+             }],
+         }
+diff --git a/src/keycast.rs b/src/keycast.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b03fcd61eb77a54c88d1b1f433aadb4bf874349
+--- /dev/null
++++ b/src/keycast.rs
+@@ -0,0 +1,152 @@
++//! The keys a recording presses, grouped into bursts for an on-screen overlay.
++
++use std::time::Duration;
++
++use crate::recording::KeyCast;
++use crate::script::{Event, KeyAction, KeySpec, NamedKey};
++
++/// How long a burst stays on screen after its last key, fade included.
++pub const VISIBLE_MS: u32 = 1300;
++/// A key within this long of the last one joins its burst.
++const JOIN_MS: u128 = 900;
++/// The overlay keeps the end of a long burst.
++const MAX_CHARS: usize = 24;
++
++#[derive(Debug, Default)]
++pub struct KeyCaster {
++    label: String,
++    typed: bool,
++    first: Duration,
++    last: Option<Duration>,
++}
++
++impl KeyCaster {
++    /// Records a key the event presses at `t`, recording time.
++    pub fn press(&mut self, event: &Event, t: Duration) {
++        let (text, typed) = match event {
++            Event::Type { text, .. } => (text.clone(), true),
++            Event::Key {
++                key,
++                action: KeyAction::Press,
++                ..
++            } => (label(key), false),
++            _ => return,
++        };
++        let joins = self
++            .last
++            .is_some_and(|last| t.saturating_sub(last).as_millis() <= JOIN_MS);
++        if joins && typed && self.typed {
++            self.label.push_str(&text);
++        } else if joins {
++            self.label.push(' ');
++            self.label.push_str(&text);
++        } else {
++            self.label = text;
++            self.first = t;
++        }
++        self.typed = typed;
++        self.last = Some(t);
++        let len = self.label.chars().count();
++        if len > MAX_CHARS {
++            self.label = self.label.chars().skip(len - MAX_CHARS).collect();
++        }
++    }
++
++    /// The overlay at `t`, while the last burst is recent.
++    pub fn at(&self, t: Duration) -> Option<KeyCast> {
++        let last = self.last?;
++        let idle_ms = t.checked_sub(last)?.as_millis() as u32;
++        (idle_ms < VISIBLE_MS).then(|| KeyCast {
++            label: self.label.trim().to_string(),
++            shown_ms: t.saturating_sub(self.first).as_millis() as u32,
++            idle_ms,
++        })
++    }
++}
++
++/// A key as macOS writes it in menus: modifier symbols, then the key.
++fn label(key: &KeySpec) -> String {
++    let mut s = String::new();
++    if key.mods.ctrl {
++        s.push('⌃');
++    }
++    if key.mods.alt {
++        s.push('⌥');
++    }
++    if key.mods.shift {
++        s.push('⇧');
++    }
++    if key.mods.super_key {
++        s.push('⌘');
++    }
++    let name = match key.key {
++        NamedKey::Enter => "↵".to_string(),
++        NamedKey::Escape => "esc".to_string(),
++        NamedKey::Tab => "⇥".to_string(),
++        NamedKey::Backspace => "⌫".to_string(),
++        NamedKey::Delete => "⌦".to_string(),
++        NamedKey::Insert => "ins".to_string(),
++        NamedKey::Space => "␣".to_string(),
++        NamedKey::Up => "↑".to_string(),
++        NamedKey::Down => "↓".to_string(),
++        NamedKey::Left => "←".to_string(),
++        NamedKey::Right => "→".to_string(),
++        NamedKey::PageUp => "⇞".to_string(),
++        NamedKey::PageDown => "⇟".to_string(),
++        NamedKey::Home => "↖".to_string(),
++        NamedKey::End => "↘".to_string(),
++        NamedKey::Shift => "⇧".to_string(),
++        NamedKey::Control => "⌃".to_string(),
++        NamedKey::Alt => "⌥".to_string(),
++        NamedKey::Super => "⌘".to_string(),
++        NamedKey::ScrollUp | NamedKey::ScrollDown => return s,
++        NamedKey::Char(c) if key.mods.any() => c.to_uppercase().collect(),
++        NamedKey::Char(c) => c.to_string(),
++    };
++    s.push_str(&name);
++    s
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::script::ModSet;
++
++    fn key(k: NamedKey, ctrl: bool) -> Event {
++        Event::Key {
++            key: KeySpec {
++                key: k,
++                mods: ModSet {
++                    ctrl,
++                    ..ModSet::NONE
++                },
++            },
++            action: KeyAction::Press,
++            count: 1,
++            delay: Duration::ZERO,
++        }
++    }
++
++    fn typed(s: &str) -> Event {
++        Event::Type {
++            text: s.to_string(),
++            delay: Duration::ZERO,
++        }
++    }
++
++    #[test]
++    fn typed_letters_form_a_word_and_keys_a_sequence() {
++        let mut k = KeyCaster::default();
++        let ms = Duration::from_millis;
++        for (i, c) in "rawr".chars().enumerate() {
++            k.press(&typed(&c.to_string()), ms(i as u64 * 70));
++        }
++        k.press(&key(NamedKey::Enter, false), ms(400));
++        assert_eq!(k.at(ms(500)).unwrap().label, "rawr ↵");
++        k.press(&key(NamedKey::Char('f'), true), ms(5000));
++        let cast = k.at(ms(5100)).unwrap();
++        assert_eq!(cast.label, "⌃F");
++        assert_eq!(cast.shown_ms, 100);
++        assert!(k.at(ms(5000 + VISIBLE_MS as u64)).is_none());
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index b95e094abb8e02ad13c1d0a44fb01503733ffd88..bc454566c4f917faeed9e4bafa2711a9b9f562bb 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -29,6 +29,7 @@
+ pub mod font;
+ pub mod full_recording;
+ pub mod hand;
++pub mod keycast;
+ pub mod keys;
+ mod pointer;
+ pub mod pty;
+diff --git a/src/recording.rs b/src/recording.rs
+index 6e847e556a3eb2ef54073ea9281f13b2ac0d6fa6..09a456ec84a581a65723a37a1e987788a9d19ee7 100644
+--- a/src/recording.rs
++++ b/src/recording.rs
+@@ -79,6 +79,19 @@ pub struct RawFrame {
+     pub mouse_cursor: Option<(f32, f32, MouseState)>,
+     #[serde(skip_serializing_if = "Option::is_none", default)]
+     pub title: Option<String>,
++    /// The keys pressed last, shown as an overlay while they are recent.
++    #[serde(skip_serializing_if = "Option::is_none", default)]
++    pub key_cast: Option<KeyCast>,
++}
++
++/// Keys pressed in a burst, such as a typed word or `⌃F`, with their timing.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct KeyCast {
++    pub label: String,
++    /// Time since the burst's first key.
++    pub shown_ms: u32,
++    /// Time since its last key.
++    pub idle_ms: u32,
+ }
+ 
+ impl RawFrame {
+@@ -92,6 +105,7 @@ impl RawFrame {
+             && self.cursor_accent == other.cursor_accent
+             && self.title == other.title
+             && self.mouse_cursor == other.mouse_cursor
++            && self.key_cast == other.key_cast
+             && self.cells == other.cells
+     }
+ }
+@@ -122,6 +136,8 @@ pub enum Frame {
+         mouse_cursor: Option<(f32, f32, MouseState)>,
+         #[serde(skip_serializing_if = "Option::is_none", default)]
+         title: Option<String>,
++        #[serde(skip_serializing_if = "Option::is_none", default)]
++        key_cast: Option<KeyCast>,
+         cells: Vec<CellSnap>,
+     },
+     Diff {
+@@ -137,6 +153,8 @@ pub enum Frame {
+         mouse_cursor: Option<(f32, f32, MouseState)>,
+         #[serde(skip_serializing_if = "Option::is_none", default)]
+         title: Option<String>,
++        #[serde(skip_serializing_if = "Option::is_none", default)]
++        key_cast: Option<KeyCast>,
+         changes: Vec<CellChange>,
+     },
+ }
+@@ -254,6 +272,7 @@ impl RecordingBuilder {
+                 cursor_accent: frame.cursor_accent,
+                 mouse_cursor: frame.mouse_cursor,
+                 title: frame.title.clone(),
++                key_cast: frame.key_cast.clone(),
+                 cells: frame.cells.clone(),
+             });
+             self.frames_since_key = 0;
+@@ -277,6 +296,7 @@ impl RecordingBuilder {
+                 cursor_accent: frame.cursor_accent,
+                 mouse_cursor: frame.mouse_cursor,
+                 title: frame.title.clone(),
++                key_cast: frame.key_cast.clone(),
+                 changes,
+             });
+             self.frames_since_key += 1;
+@@ -325,6 +345,7 @@ impl Recording {
+         let mut cursor_accent;
+         let mut mouse_cursor;
+         let mut title;
++        let mut key_cast;
+         match &self.frames[key_i] {
+             Frame::Key {
+                 t_ms: t,
+@@ -335,6 +356,7 @@ impl Recording {
+                 cursor_accent: ca,
+                 mouse_cursor: mc,
+                 title: ttl,
++                key_cast: kc,
+                 cells: cs,
+             } => {
+                 cells = cs.clone();
+@@ -346,6 +368,7 @@ impl Recording {
+                 cursor_accent = *ca;
+                 mouse_cursor = *mc;
+                 title = ttl.clone();
++                key_cast = kc.clone();
+             }
+             Frame::Diff { .. } => unreachable!(),
+         }
+@@ -363,6 +386,7 @@ impl Recording {
+                     cursor_accent: ca,
+                     mouse_cursor: mc,
+                     title: ttl,
++                    key_cast: kc,
+                     changes,
+                 } => {
+                     t_ms = *t;
+@@ -373,6 +397,7 @@ impl Recording {
+                     cursor_accent = *ca;
+                     mouse_cursor = *mc;
+                     title = ttl.clone();
++                    key_cast = kc.clone();
+                     for ch in changes {
+                         if let Some(slot) = cells.get_mut(ch.idx as usize) {
+                             *slot = ch.cell.clone();
+@@ -394,6 +419,7 @@ impl Recording {
+             cursor_accent,
+             mouse_cursor,
+             title,
++            key_cast,
+         })
+     }
+ }
+diff --git a/src/render_gif.rs b/src/render_gif.rs
+index d5976356ac0b5eb5d77162ac4aafeeadd6d272c1..961e8b61965302fc0034018343561574e14cb853 100644
+--- a/src/render_gif.rs
++++ b/src/render_gif.rs
+@@ -228,11 +228,7 @@ pub fn render_png_frame(frame: &RawFrame, opts: &RenderOptions, out: &Path) -> R
+             }
+         }
+     }
+-    let palette = generate_256_palette(
+-        opts.theme.palette_rgb()?,
+-        opts.theme.background_rgb()?,
+-        opts.theme.foreground_rgb()?,
+-    );
++    let palette = theme_palette(&opts.theme)?;
+     let title_font_set = if let Some(ref path) = opts.window_bar_font_family {
+         load_font_family(Some(path))
+             .map(|l| l.font_set)
+@@ -288,10 +284,7 @@ fn run_gif_stream_worker(
+     let no_system_fonts = opts.no_system_fonts;
+     let theme = opts.theme.clone();
+ 
+-    let base16 = theme.palette_rgb()?;
+-    let bg = theme.background_rgb()?;
+-    let fg = theme.foreground_rgb()?;
+-    let palette = generate_256_palette(base16, bg, fg);
++    let palette = theme_palette(&theme)?;
+ 
+     let mut flattened_palette = [0u8; 768];
+     for i in 0..256 {
+@@ -427,6 +420,7 @@ fn run_gif_stream_worker(
+     Ok(())
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ fn is_cell_changed(
+     col: usize,
+     row: usize,
+@@ -435,11 +429,23 @@ fn is_cell_changed(
+     cfg: ViewportConfig,
+     cell_w: u32,
+     cell_h: u32,
++    pills: &[PillBox],
+ ) -> bool {
+     let Some(prev) = prev else {
+         return true;
+     };
+ 
++    let cell_x = (cfg.content_x + col as u32 * cell_w) as f32;
++    let cell_y = (cfg.content_y + row as u32 * cell_h) as f32;
++    if pills.iter().any(|p| {
++        cell_x < p.x + p.w + 1.0
++            && cell_x + cell_w as f32 > p.x - 1.0
++            && cell_y < p.y + p.h + 1.0
++            && cell_y + cell_h as f32 > p.y - 1.0
++    }) {
++        return true;
++    }
++
+     let idx = row * curr.cols as usize + col;
+     let prev_idx = row * prev.cols as usize + col;
+     if idx >= curr.cells.len() || prev_idx >= prev.cells.len() {
+@@ -648,9 +654,24 @@ fn rasterize_raw_frame_idx(
+         }
+     }
+ 
++    // The key overlay is drawn over the cells each frame it shows, so the
++    // cells under it, and under the one before it, are drawn again first.
++    let pills: Vec<PillBox> = if prev.is_some() {
++        [
++            curr.key_cast.as_ref(),
++            prev.and_then(|p| p.key_cast.as_ref()),
++        ]
++        .into_iter()
++        .flatten()
++        .map(|cast| key_pill_box(cast, font_set, cfg).0)
++        .collect()
++    } else {
++        Vec::new()
++    };
++
+     for row in 0..curr.rows as usize {
+         for col in 0..curr.cols as usize {
+-            if is_cell_changed(col, row, curr, prev, cfg, cell_w, cell_h) {
++            if is_cell_changed(col, row, curr, prev, cfg, cell_w, cell_h, &pills) {
+                 let x = cfg.content_x + col as u32 * cell_w;
+                 let y = cfg.content_y + row as u32 * cell_h;
+ 
+@@ -831,6 +852,19 @@ fn rasterize_raw_frame_idx(
+ 
+     // Margin, border, and padding restoration is now handled at the start of rasterize_raw_frame_idx.
+ 
++    if let Some(cast) = curr.key_cast.as_ref() {
++        draw_key_pill_idx(
++            buf,
++            prev_buf,
++            palette,
++            cfg,
++            cast,
++            font_set,
++            glyph_cache,
++            curr.default_bg,
++        );
++    }
++
+     if let Some((m_col, m_row, m_state)) = curr.mouse_cursor {
+         use crate::recording::MouseState;
+         let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
+@@ -915,6 +949,100 @@ fn rasterize_raw_frame_idx(
+     }
+ }
+ 
++/// A key overlay's box, in canvas pixels.
++#[derive(Debug, Clone, Copy)]
++struct PillBox {
++    x: f32,
++    y: f32,
++    w: f32,
++    h: f32,
++}
++
++/// Where the key overlay sits: centred, just above the bottom three rows,
++/// where a TUI often keeps its input line.
++fn key_pill_box(
++    cast: &crate::recording::KeyCast,
++    font_set: &FontSet,
++    cfg: ViewportConfig,
++) -> (PillBox, PxScale) {
++    let fs = cfg.font_size_px;
++    let scale = PxScale::from(fs * 1.2);
++    let text_w = string_width(&cast.label, font_set, scale);
++    let h = (fs * 2.4).round();
++    let w = (text_w + fs * 2.0).round().max(h);
++    let content_w = cfg.cols as f32 * cfg.cell_width_px as f32;
++    let content_bottom = cfg.content_y as f32 + cfg.rows as f32 * cfg.cell_height_px as f32;
++    let x = (cfg.content_x as f32 + (content_w - w) / 2.0).round();
++    let y = (content_bottom - 3.6 * cfg.cell_height_px as f32 - h).round();
++    (PillBox { x, y, w, h }, scale)
++}
++
++/// Draws the keys pressed last as a rounded pill that fades out after them.
++#[allow(clippy::too_many_arguments)]
++fn draw_key_pill_idx(
++    buf: &mut [u8],
++    prev_buf: Option<&[u8]>,
++    palette: &[[u8; 3]; 256],
++    cfg: ViewportConfig,
++    cast: &crate::recording::KeyCast,
++    font_set: &FontSet,
++    glyph_cache: &mut GlyphCache,
++    default_bg: [u8; 3],
++) {
++    const FADE_MS: u32 = 250;
++    const EDGE: [u8; 3] = [74, 72, 69];
++    const FILL: [u8; 3] = [34, 33, 31];
++    const TEXT: [u8; 3] = [239, 236, 231];
++    let visible = crate::keycast::VISIBLE_MS;
++    let fade = if cast.idle_ms + FADE_MS > visible {
++        visible.saturating_sub(cast.idle_ms) as f32 / FADE_MS as f32
++    } else {
++        1.0
++    };
++    let (b, scale) = key_pill_box(cast, font_set, cfg);
++    let r = b.h / 2.0;
++    let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
++    for py in (b.y as i32 - 1)..=((b.y + b.h) as i32 + 1) {
++        for px in (b.x as i32 - 1)..=((b.x + b.w) as i32 + 1) {
++            if px < 0 || py < 0 || px as u32 >= cfg.canvas_w || py as u32 >= cfg.canvas_h {
++                continue;
++            }
++            let dx = ((px as f32 + 0.5 - cx).abs() - (b.w / 2.0 - r)).max(0.0);
++            let dy = ((py as f32 + 0.5 - cy).abs() - (b.h / 2.0 - r)).max(0.0);
++            let d = (dx * dx + dy * dy).sqrt() - r;
++            let outer = (0.5 - d).clamp(0.0, 1.0);
++            if outer <= 0.0 {
++                continue;
++            }
++            let inner = (0.5 - (d + 1.5)).clamp(0.0, 1.0);
++            let (x, y) = (px as u32, py as u32);
++            blend_pixel_idx(buf, prev_buf, palette, cfg.canvas_w, x, y, EDGE, outer * fade, default_bg);
++            if inner > 0.0 {
++                blend_pixel_idx(buf, prev_buf, palette, cfg.canvas_w, x, y, FILL, inner * fade, default_bg);
++            }
++        }
++    }
++    let text = [0, 1, 2].map(|i| (FILL[i] as f32 + (TEXT[i] as f32 - FILL[i] as f32) * fade).round() as u8);
++    let text_w = string_width(&cast.label, font_set, scale);
++    let (_, font) = font_set.select_for_char(0, 'M');
++    let scaled = font.as_scaled(scale);
++    let baseline = cy + (scaled.ascent() + scaled.descent()) / 2.0;
++    draw_string_idx(
++        buf,
++        prev_buf,
++        palette,
++        cfg.canvas_w,
++        (cx - text_w / 2.0).round().max(0.0) as u32,
++        baseline.round().max(0.0) as u32,
++        &cast.label,
++        font_set,
++        scale,
++        text,
++        glyph_cache,
++        default_bg,
++    );
++}
++
+ fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+     [
+         ((fg[0] as u16 + bg[0] as u16) / 2) as u8,
+@@ -1304,6 +1432,19 @@ fn lerp_lab(t: f32, lab1: [f32; 3], lab2: [f32; 3]) -> [f32; 3] {
+ }
+ 
+ /// Generates a cohesive 256-color palette based on the active terminal theme.
++/// The GIF's colours: the theme's own 256 when it lists them, or 16 to 255
++/// generated from its 16.
++fn theme_palette(theme: &crate::Theme) -> Result<[[u8; 3]; 256]> {
++    if let Some(all) = theme.palette256_rgb()? {
++        return Ok(all);
++    }
++    Ok(generate_256_palette(
++        theme.palette_rgb()?,
++        theme.background_rgb()?,
++        theme.foreground_rgb()?,
++    ))
++}
++
+ fn generate_256_palette(base16: [[u8; 3]; 16], bg: [u8; 3], fg: [u8; 3]) -> [[u8; 3]; 256] {
+     let bg_lab = rgb_to_lab(bg);
+     let fg_lab = rgb_to_lab(fg);
+diff --git a/src/render_svg.rs b/src/render_svg.rs
+index c0387edeb48dd3774ec975664ef3f5f2acd134b0..417e2fcc80c1799128710c399569b1ebb3b4bcf0 100644
+--- a/src/render_svg.rs
++++ b/src/render_svg.rs
+@@ -3421,6 +3421,7 @@ mod tests {
+                 cursor_accent: None,
+                 mouse_cursor: None,
+                 title: None,
++                key_cast: None,
+                 cells,
+             }],
+         }
+diff --git a/src/runner.rs b/src/runner.rs
+index c5c4f4236131904cc5d133db62c287eda445ee42..93a259875ae92e21826e4b8a079e17aabc5cf28f 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -330,6 +330,7 @@ pub fn run_with_raw_frame_consumers(
+     let start = Instant::now();
+     let mut next_frame_at = Duration::ZERO;
+     let mut event_idx = 0usize;
++    let mut key_cast = crate::keycast::KeyCaster::default();
+     let mut hidden = false;
+     let mut hidden_started_at: Option<Duration> = None;
+     let mut skipped_recording_time = Duration::ZERO;
+@@ -436,6 +437,9 @@ pub fn run_with_raw_frame_consumers(
+                     "dispatching scheduled event"
+                 );
+ 
++                if !hidden {
++                    key_cast.press(&scheduled.event, now.saturating_sub(skipped_recording_time));
++                }
+                 let was_hidden = hidden;
+                 execute_event(
+                     &scheduled.event,
+@@ -481,6 +485,7 @@ pub fn run_with_raw_frame_consumers(
+                         next_frame_at.saturating_sub(wait_delay),
+                         &mouse_segments,
+                     );
++                    frame.key_cast = key_cast.at(recorded_at);
+                     if !pending_screenshots.is_empty() {
+                         let shots = std::mem::take(&mut pending_screenshots);
+                         for path in shots {
+@@ -632,7 +637,11 @@ pub fn apply_theme(terminal: &mut Terminal<'_, '_>, theme: &crate::Theme) -> Res
+     // OSC 4 controls indexed palette entries, OSC 10/11/12 control
+     // foreground/background/cursor color. Using ST terminator keeps the
+     // sequences unambiguous for the VT parser.
+-    for (idx, rgb) in theme.palette_rgb()?.iter().enumerate() {
++    let indexed: Vec<[u8; 3]> = match theme.palette256_rgb()? {
++        Some(all) => all.to_vec(),
++        None => theme.palette_rgb()?.to_vec(),
++    };
++    for (idx, rgb) in indexed.iter().enumerate() {
+         let seq = format!(
+             "\x1b]4;{idx};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+             rgb[0], rgb[1], rgb[2]
+@@ -1466,6 +1475,7 @@ fn write_screenshot(frame: &RawFrame, script: &Script, path: &std::path::Path) -
+                 cursor_accent: frame.cursor_accent,
+                 mouse_cursor: frame.mouse_cursor,
+                 title: frame.title.clone(),
++                key_cast: frame.key_cast.clone(),
+                 cells: frame.cells.clone(),
+             }],
+         };
+@@ -1718,6 +1728,7 @@ pub fn capture<'a>(
+             cursor_accent,
+             mouse_cursor: None,
+             title,
++            key_cast: None,
+         },
+         raw_cursor_pos,
+     ))
+diff --git a/src/style.rs b/src/style.rs
+index 388874f29714a9281c3bbd3e6d6912770058ad49..d241588c54007c9fbacda7f99cff2bf3044f0ca0 100644
+--- a/src/style.rs
++++ b/src/style.rs
+@@ -61,6 +61,10 @@ pub struct Theme {
+     pub white: String,
+     #[serde(rename = "brightWhite")]
+     pub bright_white: String,
++    /// All 256 indexed colours, for a terminal that derives 16 to 255 from its
++    /// theme; without it, the 16 colours above are used and 16 to 255 generated.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub palette: Option<Vec<String>>,
+ }
+ 
+ impl Theme {
+@@ -88,6 +92,7 @@ impl Theme {
+             bright_cyan: DEFAULT_BRIGHT_CYAN.to_string(),
+             white: DEFAULT_WHITE.to_string(),
+             bright_white: DEFAULT_BRIGHT_WHITE.to_string(),
++            palette: None,
+         }
+     }
+ 
+@@ -112,6 +117,21 @@ impl Theme {
+         Ok(names)
+     }
+ 
++    /// The theme's 256 indexed colours, when it lists them.
++    pub fn palette256_rgb(&self) -> Result<Option<[[u8; 3]; 256]>> {
++        let Some(list) = &self.palette else {
++            return Ok(None);
++        };
++        if list.len() != 256 {
++            bail!("a theme's palette lists 256 colours, not {}", list.len());
++        }
++        let mut out = [[0u8; 3]; 256];
++        for (slot, colour) in out.iter_mut().zip(list) {
++            *slot = parse_hex_color(colour)?;
++        }
++        Ok(Some(out))
++    }
++
+     pub fn palette_rgb(&self) -> Result<[[u8; 3]; 16]> {
+         Ok([
+             parse_hex_color(&self.black)?,
+@@ -228,6 +248,7 @@ struct ThemePatch {
+     cursor: Option<String>,
+     #[serde(rename = "cursorAccent")]
+     cursor_accent: Option<String>,
++    palette: Option<Vec<String>>,
+     black: Option<String>,
+     #[serde(rename = "brightBlack")]
+     bright_black: Option<String>,
+@@ -280,8 +301,10 @@ impl ThemePatch {
+             bright_cyan: self.bright_cyan.unwrap_or(default.bright_cyan),
+             white: self.white.unwrap_or(default.white),
+             bright_white: self.bright_white.unwrap_or(default.bright_white),
++            palette: self.palette,
+         };
+         theme.palette_rgb()?;
++        theme.palette256_rgb()?;
+         theme.background_rgb()?;
+         theme.foreground_rgb()?;
+         theme.cursor_rgb()?;

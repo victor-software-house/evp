@@ -1,0 +1,130 @@
+%YAML 1.2
+---
+schema: 2
+downstream:
+  remote: origin
+  branch: downstream
+  recovery_tag_prefix: forkctl/recovery
+  publish: append
+upstream:
+  remote: upstream
+  url: https://github.com/HalFrgrd/evp.git
+  fetch_ref: refs/heads/master
+base:
+  target:
+    type: tag
+    selector: refs/tags/v0.19.0
+    commit: cb96c0aaffc1342a52ebf085b6e5567cfa938031
+  canonical: cb96c0aaffc1342a52ebf085b6e5567cfa938031
+  stack: cb96c0aaffc1342a52ebf085b6e5567cfa938031
+documents:
+  ledger: PATCHES.md
+  exports: patches/downstream
+bookkeeping_patch: fork-tooling
+patches:
+  - name: macos-pointer
+    layer: source
+    purpose: >-
+      Draw an original macOS-style black arrow with a fine white outline from one
+      geometry shared by GIF, PNG and SVG output, and show a press as a neutral 82%
+      compression with a fixed hotspot instead of saturated circles.
+    upstream_status: not-submitted
+    drop_when: >-
+      Upstream evp draws a macOS-style pointer with press feedback from one geometry
+      in every output format.
+    scope:
+      - src/pointer.rs
+      - src/lib.rs
+      - src/render_gif.rs
+      - src/render_svg.rs
+  - name: terminal-text
+    layer: source
+    purpose: "Draw text as a macOS terminal does: a tape font keeps the embedded fallbacks and finds its bold face, fallback glyphs take the primary font's height, symbols no bundled face has come from system fonts, a one-cell symbol prefers a text face to the emoji face, SVG text stays on its cells in browsers, box glyphs stay in their cells, and the pointer scales with the font."
+    upstream_status: not-submitted
+    drop_when: >-
+      Upstream evp matches a terminal's glyph fallback, sizing and cell placement in
+      GIF and SVG output, such as after its backup-font scaling fix 15011a9 covers
+      these cases.
+    scope:
+      - src/font.rs
+      - src/pointer.rs
+      - src/render_gif.rs
+      - src/render_svg.rs
+  - name: pointer-motion
+    layer: source
+    purpose: >-
+      Move the pointer along its easing in time instead of along the inverse of it,
+      add a Hand easing measured from real pointing strokes, and keep the drawn pointer
+      on the events' clock after a Wait.
+    upstream_status: not-submitted
+    drop_when: >-
+      Upstream evp samples pointer moves by time and keeps the drawn pointer on the
+      event clock after a Wait.
+    scope:
+      - src/hand.rs
+      - src/lib.rs
+      - src/record.rs
+      - src/runner.rs
+      - src/script/**
+  - name: key-cast
+    layer: source
+    purpose: >-
+      Show the latest burst of keys as a pill above the bottom rows of a GIF that
+      fades after the last key, and let a theme list all 256 indexed colours, so a
+      terminal that derives 16 to 255 from its theme renders as it does there.
+    upstream_status: not-submitted
+    drop_when: >-
+      Upstream evp shows the keys pressed in a recording and reads a theme's full
+      256-colour palette.
+    scope:
+      - src/keycast.rs
+      - src/lib.rs
+      - src/recording.rs
+      - src/render_gif.rs
+      - src/render_svg.rs
+      - src/runner.rs
+      - src/style.rs
+      - src/bin/evp.rs
+  - name: click-choreography
+    layer: source
+    purpose: "Let a tape overlap steps with Back, and with Set ClickLead draw a click's press ahead of the event: the pointer shrinks over the lead, holds, and grows back before the click ends. Without a lead a click draws as before."
+    upstream_status: not-submitted
+    drop_when: Upstream evp supports overlapping steps and a press lead for drawn clicks.
+    scope:
+      - src/runner.rs
+      - src/script/**
+      - src/recording.rs
+      - src/render_gif.rs
+  - name: fork-docs
+    layer: source
+    purpose: "Document the fork for its users and agents: installing the released binary with mise or a checksum-verified installer, a first capture, mouse choreography, the bundled evp skill, contributor and release rules, and the click-interaction plan."
+    upstream_status: "inappropriate: downstream-only documentation"
+    drop_when: The downstream fork is retired.
+    scope:
+      - README.md
+      - AGENTS.md
+      - install.sh
+      - examples/quickstart.tape
+      - skills/evp/**
+      - docs/plans/**
+  - name: fork-tooling
+    layer: tooling
+    purpose: >-
+      Own fork policy, generated evidence, the mise tools and tasks, and the verctl
+      release of the evp binary that GitHub Actions builds.
+    upstream_status: "inappropriate: downstream-only fork maintenance"
+    drop_when: The downstream fork is retired.
+    scope:
+      - patches/fork.yaml
+      - PATCHES.md
+      - patches/downstream/**
+      - mise.toml
+      - mise.lock
+      - .ctl/**
+      - mise-tasks/**
+      - .github/workflows/fork-*.yml
+disabled_patches: []
+history: []
+contracts:
+  allow_base: []
+  required_text: []

@@ -1,0 +1,394 @@
+click-choreography
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Let a tape overlap steps with Back, and with Set ClickLead draw a click's press ahead of the event: the pointer shrinks over the lead, holds, and grows back before the click ends. Without a lead a click draws as before.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp supports overlapping steps and a press lead for drawn clicks.
+---
+ src/recording.rs     |    6 +++
+ src/render_gif.rs    |   13 +++---
+ src/runner.rs        |  103 ++++++++++++++++++++++++++++++++++++++++++++++++--
+ src/script/ast.rs    |    9 ++++
+ src/script/parser.rs |   15 +++++++
+ 5 files changed, 135 insertions(+), 11 deletions(-)
+
+diff --git a/src/recording.rs b/src/recording.rs
+index 09a456ec84a581a65723a37a1e987788a9d19ee7..fd647858bb6cdf6b6eb6a782e5c1e975cbd82d00 100644
+--- a/src/recording.rs
++++ b/src/recording.rs
+@@ -77,6 +77,10 @@ pub struct RawFrame {
+     pub cursor_accent: Option<[u8; 3]>,
+     #[serde(default)]
+     pub mouse_cursor: Option<(f32, f32, MouseState)>,
++    /// How far a click has pressed the pointer while it is `Clicking`,
++    /// from 0 to 1. `None` presses it all the way for the whole click.
++    #[serde(skip_serializing_if = "Option::is_none", default)]
++    pub mouse_press: Option<f32>,
+     #[serde(skip_serializing_if = "Option::is_none", default)]
+     pub title: Option<String>,
+     /// The keys pressed last, shown as an overlay while they are recent.
+@@ -105,6 +109,7 @@ impl RawFrame {
+             && self.cursor_accent == other.cursor_accent
+             && self.title == other.title
+             && self.mouse_cursor == other.mouse_cursor
++            && self.mouse_press == other.mouse_press
+             && self.key_cast == other.key_cast
+             && self.cells == other.cells
+     }
+@@ -418,6 +423,7 @@ impl Recording {
+             cursor_color,
+             cursor_accent,
+             mouse_cursor,
++            mouse_press: None,
+             title,
+             key_cast,
+         })
+diff --git a/src/render_gif.rs b/src/render_gif.rs
+index 961e8b61965302fc0034018343561574e14cb853..c4101aaab674c932db3e01e154693a3ca692136b 100644
+--- a/src/render_gif.rs
++++ b/src/render_gif.rs
+@@ -870,8 +870,9 @@ fn rasterize_raw_frame_idx(
+         let cx = (cfg.content_x as f32 + m_col * cell_w as f32 + cell_w as f32 / 2.0) as i32;
+         let cy = (cfg.content_y as f32 + m_row * cell_h as f32 + cell_h as f32 / 2.0) as i32;
+ 
++        let press = curr.mouse_press.unwrap_or(1.0).clamp(0.0, 1.0);
+         match m_state {
+-            MouseState::Clicking => {
++            MouseState::Clicking if press > 0.0 => {
+                 draw_circle_idx(
+                     buf,
+                     prev_buf,
+@@ -882,7 +883,7 @@ fn rasterize_raw_frame_idx(
+                     cy,
+                     MOUSE_RIPPLE_CLICK_RADIUS,
+                     [220, 220, 220],
+-                    0.32,
++                    0.32 * press,
+                     curr.default_bg,
+                 );
+             }
+@@ -901,19 +902,19 @@ fn rasterize_raw_frame_idx(
+                     curr.default_bg,
+                 );
+             }
+-            MouseState::Moving => {}
++            MouseState::Clicking | MouseState::Moving => {}
+         }
+ 
+         let base = crate::pointer::scale_for_font(cfg.font_size_px);
+         let reach = |n: i32| (n as f32 * base).ceil() as i32;
+         for dy in crate::pointer::MIN..reach(crate::pointer::HEIGHT) {
+             for dx in crate::pointer::MIN..reach(crate::pointer::WIDTH) {
+-                let press = if m_state == MouseState::Clicking {
+-                    0.82
++                let shrink = if m_state == MouseState::Clicking {
++                    1.0 - 0.18 * press
+                 } else {
+                     1.0
+                 };
+-                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * press);
++                let (color, alpha) = crate::pointer::scaled_pixel(dx, dy, base * shrink);
+                 let px = cx + dx;
+                 let py = cy + dy;
+                 if alpha > 0.0
+diff --git a/src/runner.rs b/src/runner.rs
+index 93a259875ae92e21826e4b8a079e17aabc5cf28f..5ad4c20f036baedf107d97a3a33ff36d950f2c74 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -170,6 +170,34 @@ pub struct MouseSegment {
+     pub end_row: f32,
+     pub state: crate::recording::MouseState,
+     pub easing: Option<crate::hand::MouseEasing>,
++    /// For a click with a lead: when the click is sent, which is when the
++    /// drawn pointer is pressed the most.
++    pub press_at: Option<Duration>,
++}
++
++/// How far the click drawn at `recorded_at` presses the pointer, from 0 to
++/// 1, for a click with a lead: it presses in over the lead, is pressed the
++/// most when the click is sent, holds, then lets go before the click ends.
++/// `None` for every other moment, which draws a click pressed all the way.
++pub(crate) fn press_amount(recorded_at: Duration, segments: &[MouseSegment]) -> Option<f32> {
++    let s = segments
++        .iter()
++        .find(|s| s.start_time <= recorded_at && recorded_at <= s.end_time)?;
++    let at = s.press_at?;
++    let smooth = |f: f32| {
++        let f = f.clamp(0.0, 1.0);
++        f * f * (3.0 - 2.0 * f)
++    };
++    if recorded_at < at {
++        let lead = at.saturating_sub(s.start_time).as_secs_f32();
++        return Some(smooth(recorded_at.saturating_sub(s.start_time).as_secs_f32() / lead));
++    }
++    let up = at + s.end_time.saturating_sub(at) * 2 / 5;
++    let rest = s.end_time.saturating_sub(up).as_secs_f32();
++    if recorded_at <= up || rest == 0.0 {
++        return Some(1.0);
++    }
++    Some(1.0 - smooth(recorded_at.saturating_sub(up).as_secs_f32() / rest))
+ }
+ 
+ pub(crate) fn resolve_mouse_position(
+@@ -485,6 +513,8 @@ pub fn run_with_raw_frame_consumers(
+                         next_frame_at.saturating_sub(wait_delay),
+                         &mouse_segments,
+                     );
++                    frame.mouse_press =
++                        press_amount(next_frame_at.saturating_sub(wait_delay), &mouse_segments);
+                     frame.key_cast = key_cast.at(recorded_at);
+                     if !pending_screenshots.is_empty() {
+                         let shots = std::mem::take(&mut pending_screenshots);
+@@ -722,6 +752,7 @@ pub(crate) fn build_timeline(
+                 }
+             }
+             Event::Sleep(d) => cursor += scale(*d),
++            Event::Back(d) => cursor = cursor.saturating_sub(scale(*d)),
+             Event::Key {
+                 key,
+                 action,
+@@ -752,7 +783,7 @@ pub(crate) fn build_timeline(
+             } => {
+                 let per = scale(*delay);
+                 mouse_segments.push(MouseSegment {
+-                    start_time: cursor,
++                    start_time: cursor.saturating_sub(settings.click_lead),
+                     end_time: cursor + per,
+                     start_col: *col as f32,
+                     start_row: *row as f32,
+@@ -760,6 +791,7 @@ pub(crate) fn build_timeline(
+                     end_row: *row as f32,
+                     state: crate::recording::MouseState::Clicking,
+                     easing: None,
++                    press_at: (!settings.click_lead.is_zero()).then_some(cursor),
+                 });
+                 out.push(Scheduled {
+                     at: cursor,
+@@ -793,7 +825,7 @@ pub(crate) fn build_timeline(
+             } => {
+                 let per = scale(*delay);
+                 mouse_segments.push(MouseSegment {
+-                    start_time: cursor,
++                    start_time: cursor.saturating_sub(settings.click_lead),
+                     end_time: cursor + per,
+                     start_col: *col as f32,
+                     start_row: *row as f32,
+@@ -801,6 +833,7 @@ pub(crate) fn build_timeline(
+                     end_row: *row as f32,
+                     state: crate::recording::MouseState::Clicking,
+                     easing: None,
++                    press_at: (!settings.click_lead.is_zero()).then_some(cursor),
+                 });
+                 out.push(Scheduled {
+                     at: cursor,
+@@ -834,7 +867,7 @@ pub(crate) fn build_timeline(
+             } => {
+                 let per = scale(*delay);
+                 mouse_segments.push(MouseSegment {
+-                    start_time: cursor,
++                    start_time: cursor.saturating_sub(settings.click_lead),
+                     end_time: cursor + per,
+                     start_col: *col as f32,
+                     start_row: *row as f32,
+@@ -842,6 +875,7 @@ pub(crate) fn build_timeline(
+                     end_row: *row as f32,
+                     state: crate::recording::MouseState::Clicking,
+                     easing: None,
++                    press_at: (!settings.click_lead.is_zero()).then_some(cursor),
+                 });
+                 mouse_segments.push(MouseSegment {
+                     start_time: cursor + per,
+@@ -852,6 +886,7 @@ pub(crate) fn build_timeline(
+                     end_row: *row as f32,
+                     state: crate::recording::MouseState::Clicking,
+                     easing: None,
++                    press_at: None,
+                 });
+                 for _ in 0..2 {
+                     out.push(Scheduled {
+@@ -982,6 +1017,7 @@ pub(crate) fn build_timeline(
+                             end_row: ey,
+                             state: crate::recording::MouseState::Dragging,
+                             easing: None,
++                            press_at: None,
+                         });
+                     }
+ 
+@@ -996,6 +1032,7 @@ pub(crate) fn build_timeline(
+                         end_row: y_last,
+                         state: crate::recording::MouseState::Clicking,
+                         easing: None,
++                        press_at: None,
+                     });
+ 
+                     let mut last_scheduled_cell = (col0, row0);
+@@ -1099,6 +1136,7 @@ pub(crate) fn build_timeline(
+                             end_row: ey,
+                             state: crate::recording::MouseState::Moving,
+                             easing: None,
++                            press_at: None,
+                         });
+                     }
+ 
+@@ -1137,7 +1175,14 @@ pub(crate) fn build_timeline(
+             }),
+         }
+     }
+-    (out, mouse_segments, cursor)
++    // A `Back` leaves events out of order; the run takes them by time.
++    out.sort_by_key(|s: &Scheduled| s.at);
++    let end = out
++        .iter()
++        .map(|s| s.at)
++        .chain(mouse_segments.iter().map(|s: &MouseSegment| s.end_time))
++        .fold(cursor, Duration::max);
++    (out, mouse_segments, end)
+ }
+ 
+ fn generate_spline_points_f32(coords: &[(u16, u16)]) -> Vec<(f32, f32)> {
+@@ -1257,7 +1302,7 @@ fn execute_event(
+                 pty.write(b" ");
+             }
+         }
+-        Event::Sleep(_) => {
++        Event::Sleep(_) | Event::Back(_) => {
+             // Sleep is materialised as a gap in the timeline; nothing to do
+             // when we hit the (zero‑width) marker.
+         }
+@@ -1727,6 +1772,7 @@ pub fn capture<'a>(
+             cursor_color,
+             cursor_accent,
+             mouse_cursor: None,
++            mouse_press: None,
+             title,
+             key_cast: None,
+         },
+@@ -2209,6 +2255,53 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn a_led_click_is_pressed_the_most_when_it_is_sent() {
++        let ms = Duration::from_millis;
++        let segs = [super::MouseSegment {
++            start_time: ms(40),
++            end_time: ms(170),
++            start_col: 1.0,
++            start_row: 1.0,
++            end_col: 1.0,
++            end_row: 1.0,
++            state: crate::recording::MouseState::Clicking,
++            easing: None,
++            press_at: Some(ms(100)),
++        }];
++        let at = |t| super::press_amount(ms(t), &segs).expect("in the click");
++        assert!(at(40) < 0.01);
++        assert!(at(70) > 0.3 && at(70) < 0.7);
++        assert!((at(100) - 1.0).abs() < 1e-6);
++        assert!((at(120) - 1.0).abs() < 1e-6);
++        assert!(at(170) < 0.01);
++        assert_eq!(super::press_amount(ms(200), &segs), None);
++    }
++
++    #[test]
++    fn back_overlaps_the_next_steps_with_the_ones_before() {
++        let enter = Event::Key {
++            key: KeySpec {
++                key: NamedKey::Enter,
++                mods: ModSet::NONE,
++            },
++            action: KeyAction::Press,
++            count: 1,
++            delay: Duration::ZERO,
++        };
++        let events = vec![
++            Event::Sleep(Duration::from_millis(100)),
++            enter.clone(),
++            Event::Back(Duration::from_millis(60)),
++            enter,
++        ];
++
++        let (timeline, _, end) = build_timeline(&events, &Settings::default());
++        let at: Vec<Duration> = timeline.iter().map(|s| s.at).collect();
++        assert_eq!(at, [Duration::from_millis(40), Duration::from_millis(100)]);
++        assert_eq!(end, Duration::from_millis(100));
++    }
++
+     #[test]
+     fn type_preserves_gap_before_following_event() {
+         let events = vec![
+diff --git a/src/script/ast.rs b/src/script/ast.rs
+index 8c4283d98413d2d0c5d3bd3284ffa2d4e863619f..dfc7697b8162310a8923857672f0ddbf0a724b85 100644
+--- a/src/script/ast.rs
++++ b/src/script/ast.rs
+@@ -55,6 +55,10 @@ pub struct Settings {
+     pub letter_spacing: f32,
+     pub framerate: u32,
+     pub playback_speed: f32,
++    /// How long before a click is sent the drawn pointer shows it pressed
++    /// (`Set ClickLead 40ms`). Zero draws the press with the event.
++    #[serde(default)]
++    pub click_lead: Duration,
+     pub typing_speed: Duration,
+     pub theme: Theme,
+     pub cursor_blink: bool,
+@@ -116,6 +120,7 @@ impl Default for Settings {
+             letter_spacing: 1.0,
+             framerate: 50,
+             playback_speed: 1.0,
++            click_lead: Duration::ZERO,
+             typing_speed: Duration::from_millis(50),
+             theme: Theme::vhs_default(),
+             cursor_blink: true,
+@@ -135,6 +140,10 @@ pub enum Event {
+     Type { text: String, delay: Duration },
+     /// Sleep for `duration` without sending input.
+     Sleep(Duration),
++    /// Move the timeline back by `duration`, so the steps after it overlap
++    /// the ones before, such as a pointer that starts its next move while a
++    /// scroll still slows down.
++    Back(Duration),
+     /// Send a single key event (press/release), optionally repeated. `delay`
+     /// is the gap between successive events when `count > 1`.
+     Key {
+diff --git a/src/script/parser.rs b/src/script/parser.rs
+index daa2e33f93880ee605b57083c50a8390c716a9fe..c26ac975e014bff04e4cd624cbf29970165d72d8 100644
+--- a/src/script/parser.rs
++++ b/src/script/parser.rs
+@@ -226,6 +226,12 @@ fn parse_line(
+                 .ok_or_else(|| anyhow!("Sleep needs a duration"))?;
+             script.events.push(Event::Sleep(parse_duration(d)?));
+         }
++        "Back" => {
++            let d = rest
++                .first()
++                .ok_or_else(|| anyhow!("Back needs a duration"))?;
++            script.events.push(Event::Back(parse_duration(d)?));
++        }
+         "Hide" => script.events.push(Event::Hide),
+         "Show" => script.events.push(Event::Show),
+         "Screenshot" => {
+@@ -515,6 +521,7 @@ fn apply_set(rest: &[String], s: &mut Settings) -> Result<()> {
+         "BorderRadius" => s.border_radius = set_scalar_strict(rest, key)?.parse()?,
+         "LineHeight" => s.line_height = set_scalar_strict(rest, key)?.parse()?,
+         "Framerate" | "FrameRate" | "FPS" => s.framerate = set_scalar_strict(rest, key)?.parse()?,
++        "ClickLead" => s.click_lead = parse_duration(&set_scalar_strict(rest, key)?)?,
+         "PlaybackSpeed" => s.playback_speed = set_scalar_strict(rest, key)?.parse()?,
+         "TypingSpeed" => s.typing_speed = parse_duration(&set_scalar_strict(rest, key)?)?,
+         "WaitTimeout" => s.wait_timeout = parse_duration(&set_scalar_strict(rest, key)?)?,
+@@ -1142,6 +1149,14 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn click_lead_defaults_to_zero_and_takes_a_duration() {
++        let s = parse("Output out.gif\n").expect("parse");
++        assert_eq!(s.settings.click_lead, Duration::ZERO);
++        let s = parse("Output out.gif\nSet ClickLead 40ms\n").expect("parse");
++        assert_eq!(s.settings.click_lead, Duration::from_millis(40));
++    }
++
+     #[test]
+     fn unsupported_set_keys_bail() {
+         for key in ["LoopOffset"] {

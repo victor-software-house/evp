@@ -1,0 +1,1095 @@
+fork-docs
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Document the fork for its users and agents: installing the released binary with mise or a checksum-verified installer, a first capture, mouse choreography, the bundled evp skill, contributor and release rules, and the click-interaction plan.
+Upstream-Status: inappropriate: downstream-only documentation
+Drop-When: The downstream fork is retired.
+---
+ AGENTS.md                        |  127 +++++++----------
+ README.md                        |  290 ++++++++++++++------------------------
+ docs/plans/click-interactions.md |  226 ++++++++++++++++++++++++++++++
+ examples/quickstart.tape         |   15 ++
+ install.sh                       |  247 ++++----------------------------
+ skills/evp/SKILL.md              |   88 ++++++++++++
+ 6 files changed, 526 insertions(+), 467 deletions(-)
+ create mode 100644 docs/plans/click-interactions.md
+ create mode 100644 examples/quickstart.tape
+ create mode 100644 skills/evp/SKILL.md
+
+diff --git a/AGENTS.md b/AGENTS.md
+index e44af95ec4f330b5423851ad431ac16acbbfd2e0..6d8e99696dc77194adc9fb921d3046d518fc0cca 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,89 +1,74 @@
+-# AGENTS
++# EVP fork contributor guidance
+ 
+-Notes for coding agents (and humans) working in `evp`. Keep this short — it should help you avoid stepping on the same rakes we already found.
++Read README.md for the supported install and capture workflow, PATCHES.md for
++the patch stack, and ARCHITECTURE.md before changing the renderer or PTY runner.
+ 
+-## Build & Run Invariants
++## Scope
+ 
+-- **Musl Target**: This environment compiles for the `x86_64-unknown-linux-musl` target by default. When calling the compiled binary directly, make sure to use `./target/x86_64-unknown-linux-musl/...` rather than the standard `./target/...` directories.
+-- **Standalone Build**: `evp` is a workspace member of a multi-root setup (alongside `libghostty-rs` and `vhs`) but builds standalone via `cargo build`.
+-- **Prebuilt Ghostty**: For Copilot/restricted builds, **always** use the prebuilt libghostty pkg-config artifact in `assets/libghostty`; do not rely on vendored Ghostty fetches from `libghostty-vt-sys`. Keep `GHOSTTY_SOURCE_DIR` unset.
+-- **Refresh Artifact**: Refresh the prebuilt artifact using `docker buildx bake extract-libghostty`.
+-- **Performance Profile**: A release build is required for timing or smoke testing — debug is 15-20× slower because of glyph rasterization and gifski quantization:
+-  - Debug: ~200ms/frame
+-  - Release: ~14ms/frame
+-- **Smoke test**: `./target/x86_64-unknown-linux-musl/release/evp ./examples/hello.tape --output /tmp/x.gif`
+-- **Trace logs**: Append `--log-level trace` (very chatty).
+-- **Code Formatting**: Remember to run `cargo fmt` after making any edits to Rust code files.
++This is a small downstream fork of EVP v0.19.0. Keep changes focused on real
++terminal capture and pointer presentation. Do not introduce a second capture
++engine, install-time compilation or unsolicited infrastructure.
+ 
+-## Unified Font Architecture (`src/font.rs`)
++- Rust source is under src/; the CLI is src/bin/evp.rs.
++- src/pointer.rs owns original pointer geometry shared by GIF/PNG and SVG.
++- src/render_gif.rs and src/render_svg.rs own their output formats.
++- src/script/ owns tape parsing; src/runner.rs drives execution.
++- skills/evp/SKILL.md is the bundled operator skill.
+ 
+-- **Centralized Source of Truth**: All font loading, glyph fallback selection, and cell metrics calculations are centralized in `src/font.rs`. Avoid ad-hoc font parsing or loading.
+-- **Lazy Decompression**: Embedded WOFF2 files (JetBrains Mono Nerd Font Mono variants, Noto Sans Mono, Noto Sans Symbols 2, CJK JP subset, Unifont Upper/CSUR) are lazily decompressed to TTF once at runtime using `OnceLock`, caching the decoded TTF bytes.
+-- **FontSet**: Holds loaded fonts and ordered style-specific indices. When looking up a glyph, `FontSet::select_for_char` walks the list to find the first face covering the character, falling back to the primary regular font if none do.
+-- **Script Settings**: Font selection is configured strictly via the `.tape` settings (e.g. `Set Font ...`). The `--font` CLI option has been removed.
++## Runtime invariants
+ 
+-## SVG Font Embedding (`src/render_svg.rs`)
++The PTY runner must not block on rendering. Consumer channels use try_send and
++bounded queues. Drop every sender clone before joining renderer workers.
++libghostty values stay on the runner thread; only owned frame data crosses it.
++Font loading and fallback belong in src/font.rs. SVG fonts must be subsetted.
++Keep input dispatch and modifier semantics unchanged by cosmetic pointer work.
+ 
+-- **Subsetting is Mandatory**: We use the `font-subset` crate to create WOFF2 subsets of all required fonts. Only the glyphs actually used in the recording are embedded. If subsetting fails, the renderer returns an error.
+-- **WOFF2 base64 Data**: Embedded fonts are always base64-encoded WOFF2 strings in `@font-face` blocks.
+-- **Conditional Embedding**: The style block dynamically determines which font variants (bold, italic, CJK fallbacks, etc.) are actually required by scanning the character sets used in the recording. The default font is only embedded if it is actually used.
++Record real execution. Demo tests own isolated files, homes and sessions. Never
++restart or send input into a user's existing shell/session for verification.
++Do not hide or clear restored scrollback to improve a screenshot.
+ 
+-## Streaming Render Pipeline (Must-Know)
++## Patches
+ 
+-`evp` runs the runner plus one raw-frame consumer worker per output or library recording request:
+-1. **PTY/runner** — drives libghostty + the script timeline. Captures one `RawFrame` per frame deadline and hands clones to consumers with non-blocking sends.
+-2. **RawFrameConsumer worker** — gif/svg/json renderers write output files; the optional `FullRecording` consumer builds an in-memory `Recording`.
++The `downstream` branch is a forkctl patch stack on upstream v0.19.0.
++Change it only through `mise run fork`: `patch create` or `patch select`,
++stage, `patch refresh`, `patch finish`, then `publish`. patches/fork.yaml
++states each patch's purpose, scope and drop condition; PATCHES.md and
++patches/downstream/ are generated from it.
+ 
+-### Hard Rules
++## Build and verification
+ 
+-- **PTY Thread Must Never Block**: The PTY thread uses `try_send` on each consumer channel. If a queue is full, the frame is dropped and `raw_frame_consumer_dropped_frames` is logged at the end.
+-- **Channel Capacity**: Bounded channel capacity is `4096` to absorb startup bursts.
+-- **Sender-Drop Discipline (The Deadlock Gotcha)**: Every channel has multiple senders (`tx.clone()`). A worker exits its `rx.recv()` loop **only when all senders drop**. If you hold onto a clone past the `join()` call, the worker blocks forever and `JoinHandle::join` deadlocks.
+-  
+-  Concretely:
+-  ```rust
+-  let RendererHandle { tx, join } = self;
+-  drop(tx);                  // Drop the clone we exposed to the runner
+-  match join { ... h.join() } // Now the worker can exit safely
+-  ```
++Normal installation uses released archives, which GitHub Actions builds
++(.github/workflows/fork-release.yml). Do not build release binaries locally.
++`mise run evp:build aarch64-apple-darwin` is the one build: it
++prebuilds libghostty-vt from the pinned Ghostty commit with Zig 0.15.2, builds
++evp for that target, and stages the archive files. .cargo/config.toml defaults
++to Linux musl, so a cargo command names its target. Zig 0.15.2 cannot link its
++build runner against macOS 26 SDK stubs, so the release job selects Xcode 16.4.
+ 
+-- **Gifski rules (`src/render_gif.rs`)**: `gifski::new()` returns `(collector, writer)`. The writer's `write()` blocks until the collector is dropped. Never call `writer.write()` on the same thread as the collector loop unless you've already dropped the collector, or you will deadlock instantly.
+-
+-## Threading Invariants
+-
+-- libghostty types (`Terminal`, render iterators) are `!Send + !Sync`. They stay on the runner thread. Only owned `RawFrame` values (plain `Vec` + cursor + colors) cross thread boundaries.
+-- The runner does not own a `RecordingBuilder`. Only the optional `FullRecording` consumer builds an in-memory `Recording`.
+-
+-## Benchmark Conventions
+-
+-`examples/benchmark_render.rs` is the canonical timing harness. Do not silently change these settings:
+-- **`Set TypingSpeed 80ms`** — chosen so per-character `Type` events land on distinct frame deadlines at 30 fps (one keystroke ≈ 2-3 frames).
+-- **`Set Framerate 30`** — matches typical demo output.
+-- **`RENDER_REPEATS = 4`** — renders the same `Recording` 4 times to filter out cold-cache noise (Pass 1 font loads, allocator warmups).
+-- Benchmarks build their filesystem fixture under `/tmp/evp-bench-fs-*` and leave them for easy manual rerunning.
+-
+-## Debug Log Breadcrumbs
+-
+-Filter logs with:
+-```bash
+-RUST_LOG=evp::runner=debug,evp::render_gif=info,evp::render_svg=info ./target/x86_64-unknown-linux-musl/release/evp ...
++```sh
++cargo fmt --check
++cargo build --locked --release --target aarch64-apple-darwin --bin evp
++cargo test --locked --release --target aarch64-apple-darwin --lib
+ ```
+-Look for milestones in order:
+-`spawning pty` -> `applied terminal theme theme=...` -> `render thread finished path=...` -> `frames captured`.
+-If `render thread finished` doesn't print, it is a renderer-thread deadlock.
+-
+-## Things That Look Like Bugs But Aren't
+ 
+-- **Empty Diff Frames**: `Frame::Diff` with no `changes` is intentional to keep the timeline aligned with the framerate for animations like cursor blinking.
+-- **Padding**: The recording extends `total_duration` by ~4 frame intervals past the last script event to keep the final state visible and avoid stuck loops.
+-- **Pass 1 Slowness**: The first pass of `benchmark_render` is slower due to font loading and allocator warmup.
++Use release builds for capture/performance verification. Debug rendering is not
++representative. Check actual GIF timing, SVG output, PNG and interactive input
++behavior, not only parser acceptance. Add focused regressions for changed
++geometry, events or formatting. Use exact targeted edits in large renderers.
+ 
+-## Docker Build Environment
++## Distribution contract
+ 
+-- `ci/libghostty-pkgconfig.Dockerfile` builds the prebuilt `libghostty-vt` static library, headers, and pkg-config files into `assets/libghostty`.
+-- Run `docker buildx bake extract-libghostty` to refresh `assets/libghostty` so local and CI builds do not need network access for Zig/Ghostty fetches.
+-- `ci/vhs.Dockerfile` is based on the charmbracelet VHS image and bakes in `scripts/stress_test_program.py` and `scripts/stress_test.tape` for the stress-test comparison run.
++Each release archive contains evp, README.md, AGENTS.md, PATCHES.md,
++ARCHITECTURE.md, LICENSE, licenses/, skills/evp/ and examples/quickstart.tape
++at its root, as evp-<version>-aarch64-apple-darwin.tar.gz with its .sha256.
++verctl publishes it as the vendored set `evp` in .ctl/ver.yaml.
+ 
+-## Common Mistakes & Gotchas (From Past Agents)
++The version is upstream's version plus -vsh.N, such as 0.19.0-vsh.1, and the
++tag is evp-<version>. It never matches the inherited upstream v*.*.* release
++workflow, so do not run that workflow. Raise N in .ctl/ver.yaml for a new build
++on the same upstream base, and start again at 1 after a rebase; the push to
++downstream that changes it releases.
+ 
+-- **PTY Process Deadlock**: Standard shells (like `dash`/`/bin/sh`) can ignore `SIGHUP` inside virtual PTY/container environments. Always use `SIGKILL` instead of `SIGHUP` to reap child processes in `Child::drop` (`src/pty.rs`), otherwise test suites will deadlock/hang indefinitely.
++Update README and the bundled skill with user-visible CLI/capture changes.
++Keep all known output formats aligned. Do not publish uncommitted working-tree
++binaries. Tag the exact verified revision and do not overwrite release assets.
+diff --git a/README.md b/README.md
+index c1eb9b1e1dca6cd08575f435589115710f0955f7..dc95622203028eb0622d58cf5627212acf716377 100644
+--- a/README.md
++++ b/README.md
+@@ -1,210 +1,138 @@
+-# EVP
+-
+-<div align="center">
+-
+-[![CI](https://github.com/HalFrgrd/evp/actions/workflows/ci.yml/badge.svg)](https://github.com/HalFrgrd/evp/actions/workflows/ci.yml)
+-[![License](https://img.shields.io/github/license/HalFrgrd/evp)](https://github.com/HalFrgrd/evp/blob/master/LICENSE)
+-[![Latest Release](https://img.shields.io/github/v/release/HalFrgrd/evp)](https://github.com/HalFrgrd/evp/releases)
+-
+-**EVP is a CLI tool to make beautiful terminal recordings.**
+-
+-</div>
+-
+-> [!WARNING]
+-> EVP is still a work in progress and there will be breaking changes without warning.
+-
+-You create a `.tape` file and run `evp demo.tape` to produce smooth, high quality, portable GIF or SVG demos.
+-EVP is a rewrite of [VHS](https://github.com/charmbracelet/vhs) with some key improvements.
+-
+-See it in action below:
+-
+-![Demo](https://github.com/HalFrgrd/evp/releases/download/assets/evp_demo.gif)
+-
+-
+-## VHS comparison
+-EVP is extends [VHS](https://github.com/charmbracelet/vhs) in these ways:
+-- Significantly faster. No more skipped frames when creating demos in GitHub Actions!
+-    - Frames are written to the GIF file as the recording session runs.
+-    - When the recording finishes, the GIF file is instantly ready.
+-- Animated SVGs:
+-    - Super crisp demos
+-    - You can select and copy text from the SVG as it is playing!
+-    - Fonts are embedded into the SVG so the demos are portable (fonts are subsetted before embedding)
+-    - SVG screenshots
+-    - [Box-drawing chars](https://en.wikipedia.org/wiki/Box-drawing_characters) are rendered as SVG shapes. Don't worry, an invisible character is written to the SVG so selecting and copying text works as expected.
+-- Supports [Kitty extended keycodes](https://sw.kovidgoyal.net/kitty/keyboard-protocol/). e.g:
+-    - `Ctrl+Shift+Alt+Left`
+-    - `Command+Alt+PageUp`
+-- Specify full shell path with arguments. e.g.:
+-    - `Set Shell bash --init-file test.rc`
+-    - `Set Shell yazi` you can specify any program, not just a shell!
+-- EVP has no runtime dependencies
+-    - It is a statically linked [musl binary](https://www.musl-libc.org/)
+-    - A collection of useful fonts are embedded into EVP
+-- Mouse support: you can script mouse clicks, dragging, movement <img src="https://github.com/HalFrgrd/evp/releases/download/assets/mouse_small.gif" alt="mouse_small" width="500" />
+-- Set the terminal size by number of rows / cols or by number of pixels.
+-- Coming soon: resize support
+-- Coming soon: snapshot process metrics to help debug interactive use
+-- Coming soon: key event name overlay
+-## Install and Usage
+-
+-### Quick install: `install.sh`
+-
+-> [!TIP]
+-> No `sudo` required!
+-```bash
+-curl -sSfL https://github.com/HalFrgrd/evp/releases/latest/download/install.sh | sh
+-```
++# EVP — terminal recordings with a natural pointer
+ 
+-After installing, you can:
+-- **Start from a reference script, edit it, then run `evp demo.tape`**:
+-  ```bash
+-  # Generate a reference script:
+-  evp print-ref-script > demo.tape
++Run real terminal programs and capture GIFs, animated SVGs and PNG screenshots.
++This fork adds a crisp macOS-style pointer with visible press/release feedback,
++terminal-accurate text, eased pointer motion, a key pill and click choreography.
++[PATCHES.md](PATCHES.md) lists each change.
++It is based on [EVP v0.19.0](https://github.com/HalFrgrd/evp/tree/v0.19.0).
+ 
+-  # Edit the tape file with your editor (e.g. vim demo.tape), then get evp to create a gif from it:
+-  evp demo.tape
+-  ```
+-  If you already have a VHS script, you can run:
+-  ```bash
+-  evp --mimic-vhs demo.tape
+-  ```
++## Install without building
+ 
+-- **Or you can run `evp record`**:
+-  You can record your live terminal sessions directly to a `.tape` file and a corresponding `.gif`! EVP turns your terminal into raw mode and captures all keystrokes, mouse clicks, drags, movements, and scrolling:
+-  ```bash
+-  # Record your session (saves to demo.tape and demo.gif by default)
+-  evp record
++**Current binary: macOS on Apple Silicon (arm64).** Other platforms are not
++packaged by this fork yet. No Rust, Zig, Bun or runtime dependencies required.
+ 
+-  # Customize the outputs, shell, theme, and geometry:
+-  evp record --output my_demo.tape --output demo.svg --shell zsh --theme "Catppuccin Mocha" --cols 100 --rows 40
+-  ```
+-  When you are done, simply exit the subshell (e.g., type `exit` or press `Ctrl+D`). EVP will write the formatted `demo.tape` script and `demo.gif` of your session!
+-  Then tweak `demo.tape` to your liking, and run `evp demo.tape` to produce a new GIF:
++With [mise](https://mise.jdx.dev/):
+ 
+-  ![EVP Record Demo](https://github.com/HalFrgrd/evp/releases/download/assets/evp_record_demo.gif)
++```sh
++mise use -g 'github:victor-software-house/evp[version_prefix=evp-]@0.19.0-vsh.1'
++evp --version
++```
+ 
++Or download the installer, inspect it, then run it:
+ 
++```sh
++curl -fL https://raw.githubusercontent.com/victor-software-house/evp/evp-0.19.0-vsh.1/install.sh -o /tmp/evp-install.sh
++sh /tmp/evp-install.sh
++```
+ 
+-### Using EVP in CI
+-For automated rendering in workflows, pipelines, or containers, see [EVP in CI](evp_in_ci.md).
++The installer checks the archive's SHA-256 before installing. It defaults to
++`~/.local/bin/evp` and `~/.local/share/evp/`. It does not change your PATH or
++shell configuration. Set `EVP_INSTALL_DIR` to select another binary directory.
++The documentation lives at `../share/evp` relative to that directory.
++Set `EVP_VERSION` to a release tag, such as `evp-0.19.0-vsh.1`, to select a fork release.
+ 
++Release archives include the executable, checksums, license, documentation,
++a working example and the [bundled skill](skills/evp/SKILL.md).
++For manual installation, download the archive and its `.sha256` from
++[Releases](https://github.com/victor-software-house/evp/releases), run
++`shasum -a 256 -c <archive>.sha256`, extract, and put `evp` on PATH.
+ 
++## Your first capture
+ 
+-## Technology
+-EVP runs a shell inside an embedded [libghostty](https://ghostty.org) terminal.
+-This allows us to support advanced terminal features in a headless environment such as: complex key combinations; key press and key release events; mouse input support; legacy escape codes: Kitty image protocol (comming soon!).
++Create `hello.tape`:
+ 
+-The SVG animations use [SMIL](https://developer.mozilla.org/en-US/docs/Web/SVG/Guides/SVG_animation_with_SMIL).
+-Fonts are embedded into the SVG using [this method](https://stackoverflow.com/questions/79680618/how-to-embed-a-font-inside-a-svg-file).
+-A custom optimizer reduces the file size and complexity.
+-All the text on one terminal row is rendered inside of a `<text>` span which helps the browser copy the right text when you select and copy from the SVG.
++<!-- START_REF_SCRIPT -->
++```text
++Output hello.gif
++Output hello.svg
++Set Shell /bin/zsh -f
++Set Theme "Catppuccin Mocha"
++Set Cols 72
++Set Rows 12
++Set FontSize 20
++Set Padding 24
++Set Framerate 50
++Env PS1 "❯ "
++Sleep 500ms
++Type "printf 'Hello from EVP\\n'"
++Enter
++Sleep 1s
++Screenshot hello.png
++```
++<!-- END_REF_SCRIPT -->
+ 
+-GIF rendering: a 256 color palette is setup at the start and reused for nearly all frames.
+-Only minimal diffs between frames are written to the file.
+-This yields exceptionally small GIF file sizes.
++Then:
+ 
++```sh
++evp validate hello.tape
++evp hello.tape
++open hello.gif
++```
+ 
+-## Script Reference
++If your image viewer does not animate GIFs, open the file in a browser.
++The archive contains this example at `examples/quickstart.tape`.
+ 
+-EVP supports a superset of VHS `.tape` script language. Below is a complete template of all supported commands, settings, and events in the EVP `.tape` script language:
++## Record an interactive session
+ 
+-<!-- START_REF_SCRIPT -->
+-```elixir
+-# --- Output & Dependencies ---
+-Output demo.gif                     # Target output file (supports .gif, .svg, .svgz, .json, .stats)
+-Output demo.json                    # Multiple outputs are supported. You can use the `--ouput demo.svg` flag also.
+-Output demo.svg                     # Recommended
+-Output demo.svgz                    # gzip-compressed svg, less widely supported
+-Output demo.stats                   # Reports some stats about the rendering process
+-Require curl                        # Assert that curl is available on system PATH
+-Source common.tape                  # Inline another tape file
+-
+-# --- Window & Font Settings ---
+-Set Shell bash                      # Configure shell execution path (e.g. bash, zsh, fish)
+-Set Shell bash --norc               # EVP supports any command as the "shell"
+-Set Shell yazi                      # You can boot right into your TUI
+-
+-Set Theme "Catppuccin Mocha"        # Apply a predefined colour theme (run `evp themes` to discover themes)
+-Set Font "JetBrains Mono"           # Monospace font family name
+-Set FontSize 20                     # Font size in pixels
+-Set LineHeight 1.2                  # Line spacing multiplier
+-Set LetterSpacing 0                 # Letter spacing adjustment
+-Set Width 800                       # Terminal window width in pixels
+-Set Height 400                      # Terminal window height in pixels
+-Set Cols 100                        # Set terminal width in rows (Set Width has precedence)
+-Set Rows 30                         # Set terminal height in rows (Set Height has precedence)
+-Set Padding 10                      # Inner padding between terminal grid and window frame
+-Set Margin 20                       # Outer margin around window frame
+-Set MarginFill "#6B50FF"            # Background colour of outer margin area
+-Set Framerate 30                    # Recording framerate in FPS
+-Set TypingSpeed 50ms                # Default speed/interval for typed text
+-
+-# --- Child Process Environment ---
+-Env PS1 "$ "                        # Set environment variables for the shell process
+-
+-# --- Playback & Timeline Controls ---
+-Sleep 1s                            # Pause playback for a duration (e.g. 500ms, 1.5s, 2m)
+-Hide                                # Hide subsequent commands from recording output
+-Show                                # Resume recording commands to output files
+-Screenshot frame.png                # Capture the current terminal window frame as a PNG, SVG, JSON, TXT, or ASCII
+-Screenshot frame.svg
+-Screenshot frame.json
+-Screenshot frame.txt
+-Screenshot frame.ascii
+-
+-# --- Clipboard Controls ---
+-Copy "text to clipboard"            # Copy a string into the system clipboard
+-Paste                               # Paste current clipboard contents into terminal
+-
+-# --- Keyboard & Input Events ---
+-Type "echo 'hello'"                 # Type text at the current default TypingSpeed
+-Type@10ms "fast typing"             # Type text at an overridden speed of 10ms
+-Enter                               # Press key alias (equivalent to Key "Enter" / Key "Return")
+-Backspace 5                         # Repeat a key alias N times (press Backspace 5 times)
+-Ctrl+C                              # Press key combination modifier
+-Ctrl+Shift+Alt+Left                 # Even complex key codes are possible.
+-Press Down                          # Explicitly hold a key down
+-Release Down                        # Explicitly release a held key
+-
+-# --- Mouse Controls ---
+-Click 10 20                         # Left click at column 10, row 20
+-Shift+Click 10 20                   # Shift + Left click at column 10, row 20
+-Ctrl+RightClick 10 20               # Ctrl + Right click at column 10, row 20
+-DoubleClick 10 20                   # Double click at column 10, row 20
+-MouseMove@1.2s 0 0 10 15 30 10 40 40     # Move cursor along a smooth Catmull-Rom spline curve passing through (0,0), (10,15), (30,10), and (40,40)
+-MouseMove@1.2s@EaseInOutElastic 0 0 10 15 40 40 # Move cursor along a spline curve with EaseInOutElastic easing curve override
+-Shift+Ctrl+MouseDrag@EaseInOutQuad 0 0 10 15 40 40 # Left click and drag along a spline curve holding Shift+Ctrl
+-Ctrl+MouseScroll 10 20 Up           # Scroll mouse wheel Up at column 10, row 20 holding Ctrl
+-
+-# --- Wait / Synchronization ---
+-Wait /regex/                        # Wait for output matching regular expression
+-Wait+Screen /regex/                 # Wait scanning full screen instead of only the last line
+-Wait+Line /regex/                   # Explicitly wait scanning last line only (default)
+-Wait@1s /regex/                     # Wait with an overridden timeout of 1s (default is 15s)
+-Wait+Line@1s /regex/                # Wait scanning last line with 1s timeout override
+-Wait+Screen@1s /regex/              # Wait scanning full screen with 1s timeout override
++```sh
++evp record --output demo.tape --output demo.gif --shell zsh --cols 90 --rows 24
+ ```
+-<!-- END_REF_SCRIPT -->
+ 
+-## Examples
++Exit the recorded subshell when finished. Edit the resulting tape and replay it
++with `evp demo.tape`. Tape commands execute real programs: review downloaded tapes
++before running them. Isolate demo files and environments; never record secrets.
++
++## Mouse-driven demos
++
++Coordinates are zero-based terminal columns and rows, not pixels. For a target
++at column 12, row 5, a starting point is:
++
++```text
++MouseMove@300ms@Linear 24 8 12 5
++Sleep 250ms
++Ctrl+Click@120ms 12 5
++Sleep 350ms
++MouseMove@450ms@Linear 12 5 24 8
++```
+ 
+-See [examples.md](examples.md) for a showcase of pre-rendered GIF animations demonstrating custom themes, layout controls, mouse input scripting, and window title bars.
++The sleeps provide pre-click hover and post-release dwell. `Click@120ms` holds
++the button for that duration; it is not an extra delay after a click. Omit
++`Ctrl+` when the application expects an ordinary click. Inspect the actual app:
++these timings are a starting point, not proof of natural interaction.
+ 
+-## Serving SVGs / SVGZs
++GIF timing uses hundredths of a second. 50 fps maps to 20 ms motion frames.
++Static frames may be combined into longer holds. Check the exported animation
++in a browser; do not infer its smoothness solely from `Set Framerate`.
+ 
+-Unfortunately, GitHub doesn't support embeddable SVGs in such a way that you can select text from the SVG.
++## Themes, fonts and synchronization
+ 
++- `evp themes` lists presets. `Set Theme { "background": "#232136", "foreground": "#e0def4" }` accepts custom colors.
++- Use the bundled font by omitting a font setting. `Set Font` is **not valid**
++  in v0.19.0. `Set FontFamily "/absolute/path/font.ttf"` selects a font file;
++  installed family names are not reliably resolved.
++- `Wait+Screen@10s /ready/` waits for rendered text. Prefer it to guessed startup sleeps.
++- `Screenshot frame.png` captures a real rendered frame. SVG and JSON are also supported.
++- `evp --help` and `evp record --help` describe CLI flags.
++- `print-ref-script` prints a commented quickstart plus upstream's test tape.
++  The bundled `examples/quickstart.tape` is the minimal runnable starting point.
+ 
+-## Acknowledgments
++## Agent skill
+ 
+-### VHS
++The archive's `skills/evp/SKILL.md` teaches capture, isolation, mouse choreography
++and verification. With the installer it is at `~/.local/share/evp/skills/evp/`;
++with mise it is inside `mise where 'github:victor-software-house/evp[version_prefix=evp-]'`.
++Point your agent's skill loader there or copy that directory into its supported
++project skill directory. Installation does not alter your agent configuration.
+ 
+-EVP is based on the [VHS](https://github.com/charmbracelet/vhs) project.
+-They share little code but EVP does try use the same `.tape` file format.
++## Development
+ 
+-The colour themes in [`assets/vhs-themes.json`](assets/vhs-themes.json) are taken from the [VHS](https://github.com/charmbracelet/vhs) project and are licensed under the MIT License. See [licenses/VHS-MIT.txt](licenses/VHS-MIT.txt) for the full license.
++`Back` and `Set ClickLead` follow the
++[click-interaction plan](docs/plans/click-interactions.md).
+ 
+-### Font providers
++See [AGENTS.md](AGENTS.md), [PATCHES.md](PATCHES.md) and the upstream
++[architecture](ARCHITECTURE.md). Normal users should install the binary.
++The fork remains experimental; pin a release. A new demo or unreleased branch
++change does not silently update an installed binary.
+ 
+-Some fonts are embedded inside the EVP binary. See licenses in [license](licenses/) for the full license text.
++MIT. Upstream copyright and bundled font notices are retained in `LICENSE`
++and `licenses/`. The pointer is original macOS-style artwork, not an Apple asset.
+diff --git a/docs/plans/click-interactions.md b/docs/plans/click-interactions.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e02fc999046266276e7c37d5824ae5ebb016c22c
+--- /dev/null
++++ b/docs/plans/click-interactions.md
+@@ -0,0 +1,226 @@
++# Natural click interactions
++
++Status: proposed plan only. No implementation or build is authorized by this
++change. Public API and recording-format details below require approval before
++implementation.
++
++## Outcome
++
++Make a natural click easy to author and make every ordinary click visibly read
++as a press followed by a release. Keep actual input, recorded evidence and all
++rendered formats synchronized. Reuse EVP's scheduler, renderer and easing
++library; do not add another automation or animation framework.
++
++### User decisions
++
++- Approach, hover before pressing, remain on target during the click, and dwell
++  after release. Do not immediately flee the target.
++- Motion must look smooth at at least 30 fps; verify the exported motion, not
++  merely a framerate setting. Use 50 fps for GIF's exact 20 ms cadence.
++- Keep the macOS-style pointer, subtle feedback and requested terminal palette.
++- Preserve actual terminal execution, scrollback and typed input.
++- Builds and tests requiring compilation run only on the approved remote
++  builder, never on the machine that captures the demo.
++- Keep Claude's active demo work isolated. Do not edit its tape or replace its
++  binary during this work.
++- Write and push this plan first. Do not implement it yet.
++
++### Non-goals
++
++No desktop automation, semantic widget detection, image matching, AI movement,
++randomized human imitation, new capture engine, automatic withdrawal, extra
++runtime dependency or general-purpose animation DSL. Do not change zsh prompt
++behavior, Herdr history restoration or the plugin's resume implementation.
++
++## Existing implementation and prerequisite
++
++Baseline: released fork `pointer-v0.19.0-1`, commit `b35332e`.
++
++- `src/script/ast.rs` already models Click, RightClick, DoubleClick, MouseMove,
++  MouseDrag and low-level MouseInput.
++- `src/runner.rs::build_timeline` schedules the actual press/release edges;
++  Click's duration is a button hold, not an after-click pause.
++- `MouseSegment` and `resolve_mouse_position` produce pointer state.
++- `src/pointer.rs` shares arrow geometry. GIF/PNG and SVG currently switch
++  compression/halo by Moving/Clicking/Dragging state rather than elapsed phase.
++- `RawFrame` and stored Key/Diff frames carry only position and MouseState.
++  `RawFrame::is_visually_identical` can coalesce unchanged frames.
++- SVG's MouseSpan aggregates sampled position/state intervals.
++
++Integrate and verify the native movement correction first:
++[`b9b69f8`](https://github.com/victor-software-house/evp/commit/b9b69f8).
++It fixes inverted timing, uneven Linear motion, negative-time easing failures,
++and repeated easing between samples. Do not preserve hand-timed linear legs as
++an alternative implementation after that correction is available.
++
++## Proposed design
++
++### 1. A small interaction helper
++
++Provide one library helper that expands an explicit click interaction into the
++existing movement, sleep and click events. A thin tape command calls the same
++helper. Do not introduce a second scheduler or execute hidden input.
++
++Proposed public shape (names are provisional):
++
++- Rust: `ClickInteraction` with target, optional origin, modifiers, approach
++  duration/easing, hover duration, press duration and post-release dwell.
++- Tape: `ClickAt <col> <row>` with optional named settings such as
++  `from=24,8 approach=300ms hover=250ms press=100ms dwell=300ms`.
++  Modifier prefix remains consistent with existing commands: `Ctrl+ClickAt`.
++- Explicit origin wins; otherwise use the known pointer position at that point
++  in the timeline. If neither exists, fail validation with an actionable error.
++  Never invent an off-screen origin or silently teleport.
++- Same-position clicks omit approach but retain hover, press and dwell.
++- One deterministic expansion:
++  `MouseMove → Sleep(hover) → Click(press) → Sleep(dwell)`.
++- Withdrawal remains an explicit subsequent MouseMove. Not every click should
++  move away, and the helper must not hide what the author intends.
++
++Starting defaults to evaluate, not claims about universal human timing:
++300 ms approach using corrected EaseInOutCubic, 250 ms hover, 100 ms press,
++300 ms post-release dwell. Every phase is independently configurable, including
++zero-duration hover/dwell. Reject negative durations, invalid coordinates,
++unknown options and unsupported modifier combinations at the parser boundary.
++
++Existing `Click`, `RightClick`, `DoubleClick` and `MouseMove` syntax and input
++semantics do not change. The convenience helper initially supports a single
++left click plus existing modifiers; do not grow a preset catalogue.
++
++### 2. Time-based feedback for all click entry points
++
++Visual feedback is separate from input scheduling. It must not add an input
++hold, duplicate a click or change when the application receives release.
++
++Use a shared, pure phase evaluator driven by exact scheduler/recorded input
++edges and the frame timestamp:
++
++| Phase | Presentation | Input |
++| --- | --- | --- |
++| Approach/hover | Full-size pointer; no halo | Movement only |
++| Press onset | Brief compression toward pressed scale | One press edge |
++| Held | Stable pressed scale; restrained halo | No repeated press |
++| Release | Return to full size; short fading/expanding halo | One release edge |
++| Dwell | Full-size pointer remains at target | None |
++
++Suggested initial visual parameters: 0.88 pressed scale, 60 ms compression,
++100 ms recovery and 180 ms release halo. Evaluate these visually before fixing
++them as defaults. Start release recovery from the actual current scale when a
++hold is shorter than compression; no jump to a never-reached scale. A short
++click must still have discernible release feedback. No elastic bounce by
++default, oversized disk, permanent halo or pointer disappearance after release.
++
++The arrow scales around the hotspot. The release halo stays anchored at the
++actual click location if the pointer subsequently moves; it must not follow the
++cursor across the result. A new click replaces the prior transient feedback
++rather than allocating an unbounded effect queue. Double-clicks preserve their
++two input edges and two distinct feedback onsets. A drag must not emit a click
++pulse at every motion sample; retain drag semantics and show release once.
++
++### 3. One timeline across live capture and re-rendering
++
++Do not infer exact click timing solely from sampled MouseState changes: a press
++and release can both fall between frame deadlines. Preserve input-edge timing
++through the recording path so short clicks and replay are correct.
++
++Proposed representation to approve before implementation: an optional,
++bounded pointer-feedback snapshot on RawFrame and stored Key/Diff frames,
++containing the active press/release timestamps and click origin. Keep pointer
++position and MouseState as input facts; do not encode animation scale as a
++fake mouse coordinate. A release snapshot survives until its effect expires.
++
++Update every writer/reader together: runner, interactive recorder, full-recording
++consumer, recording builder/reconstruction, JSON export/import, GIF/PNG and SVG.
++Decide the exact field names and document the JSON contract before editing.
++New exports must preserve enough information for equivalent offline rendering.
++
++The current upstream EVP v0.19.0 JSON producer remains a named external source
++of recordings without exact edge metadata. If retaining import support, define
++and test its limited behavior explicitly: inferred frame-boundary timing, with
++no claim of recovering sub-frame clicks. Do not scatter fallback logic across
++renderers. Inventory existing JSON fixtures/readers before approving this
++compatibility decision; otherwise make a documented format break and reject
++old data clearly. This is a decision gate, not permission to silently change
++stored data.
++
++Compute animated scale/halo from the same shared evaluator in every renderer.
++A standalone PNG at time t must match the GIF frame and SVG presentation at t.
++Keep elapsed-time calculations independent of frame count and wall-clock speed.
++
++Animation-only changes must survive equality checks, dirty-region detection
++and frame coalescing. Include both the previous and current arrow/halo bounds
++when restoring pixels, including an anchored halo after pointer withdrawal.
++Handle the final frame/tail explicitly: let a final release effect finish
++without delaying or inventing application input.
++
++## Ordered implementation and proof
++
++1. **Approve contracts and integrate movement prerequisite.**
++   Confirm helper naming, defaults and recording representation/compatibility.
++   Inventory current readers, writers and fixtures. Merge the native movement
++   correction without changing Claude's working checkout.
++   → Proof: existing motion regressions and package checks pass remotely.
++
++2. **Add failing timing and presentation regressions.**
++   Characterize existing Click input edges; reproduce missing sub-frame click
++   feedback and state-only visual jumps.
++   → Proof: new targeted tests fail for those reasons on the baseline, not from
++   unrelated SDK/build setup.
++
++3. **Implement the single helper expansion.**
++   Cover parser, Rust API export and tape serialization together. Preserve
++   modifiers, coordinates and press duration exactly.
++   → Proof: helper and manually expanded events have identical input timelines;
++   zero/same-position phases, missing origin and malformed options are tested.
++
++4. **Implement exact feedback timing through recording and renderers.**
++   Wire both scripted and interactive input into the shared phase evaluator;
++   update all serialization and rendering consumers in one complete change.
++   → Proof: ordinary/right/double/drag clicks, very short holds, repeated clicks,
++   nonzero recording start time, Wait delays, Hide/Show, cursor disappearance,
++   zero-duration events and recording replay have deterministic outcomes.
++   Verify exact input-edge counts and no invented events.
++
++5. **Verify rendered behavior, not only math.**
++   Run a small isolated mouse-reporting fixture and a real Herdr Ctrl-click
++   interaction. Capture pre-hover, pressed, released, dwell and withdrawal
++   frames. Compare GIF, SVG and PNG at shared timestamps. Check a click with no
++   terminal text changes so frame coalescing cannot hide missing animation.
++   → Proof: 50 fps motion/feedback frames use 20 ms GIF delays; a 30 fps setting
++   has no unintended gaps beyond its cadence/format quantization. Intentional
++   stationary holds are measured separately. Input logs match the visual click.
++   Inspect the final animation in a browser and get operator visual approval.
++
++6. **Document and distribute the verified behavior.**
++   Update README's build-time reference markers, quickstart, FORK.md, AGENTS.md
++   where needed, and skills/evp/SKILL.md. Remove obsolete state-only drawing and
++   any demo compensation made unnecessary by the native path; coordinate demo
++   edits with its owner rather than overwriting their work.
++   → Proof: tests pass, packaged quickstart renders, bundled skill validates,
++   archive contains docs/skill, and a fresh checksum-verified binary install
++   works without a compiler. Publish a new immutable fork release only after
++   implementation approval and verification; never replace prior assets.
++
++## Expected files
++
++- `src/script/ast.rs`, `src/script/parser.rs`, script serialization location,
++  and `src/lib.rs`: helper contract and existing-event expansion.
++- `src/runner.rs`, `src/record.rs`: actual event timing and live recording.
++- `src/pointer.rs`: shared visual evaluator; geometry remains centralized.
++- `src/recording.rs`, `src/full_recording.rs`, `src/render_json.rs`: complete
++  feedback-data propagation and replay.
++- `src/render_gif.rs`, `src/render_svg.rs` and relevant renderer glue: shared
++  presentation, dirty bounds and frame retention. Use exact edits in large files.
++- Existing nearby tests plus a narrowly scoped click fixture when necessary.
++- README, FORK, bundled skill, quickstart and release packaging guidance.
++
++Avoid a new file when the existing module is a clear owner. Do not expand the
++plan into a framework, broad refactor, or unrelated release automation.
++
++## Completion gate
++
++One normal tape command can author a natural click without hand-timed movement
++legs; ordinary Click also receives consistent time-based feedback. Both input
++and visuals are evidenced, the operator approves the appearance, and a new
++prebuilt release carries matching docs and skill. Until then, this remains a
++plan or work in progress—not a claim that the current release implements it.
+diff --git a/examples/quickstart.tape b/examples/quickstart.tape
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f2c19ff3bfd903261da4ecbd757c31fa623a8d0
+--- /dev/null
++++ b/examples/quickstart.tape
+@@ -0,0 +1,15 @@
++Output hello.gif
++Output hello.svg
++Set Shell /bin/zsh -f
++Set Theme "Catppuccin Mocha"
++Set Cols 72
++Set Rows 12
++Set FontSize 20
++Set Padding 24
++Set Framerate 50
++Env PS1 "❯ "
++Sleep 500ms
++Type "printf 'Hello from EVP\\n'"
++Enter
++Sleep 1s
++Screenshot hello.png
+diff --git a/install.sh b/install.sh
+index cfb9a4ffe0510e396e994c23803403e26ae5188b..4e51b0d4426e35d16e3e3332d9223a297bf755cd 100755
+--- a/install.sh
++++ b/install.sh
+@@ -1,218 +1,35 @@
+ #!/bin/sh
+-# evp installer — downloads a prebuilt evp binary from the latest GitHub
+-# release.
+-#
+-# Usage:
+-#   curl -sSfL https://github.com/HalFrgrd/evp/releases/latest/download/install.sh | sh
+-#
+-# Override the version (default `latest`):
+-#   curl -sSfL .../install.sh | EVP_VERSION=v0.2.0 sh
+-#
+-# Override the default install dir:
+-#   curl -sSfL .../install.sh | EVP_INSTALL_DIR=~/.local/bin sh
+-
++# Install a checksummed fork binary plus its documentation and skill.
+ set -eu
+-
+-expand_path() {
+-    case "$1" in
+-        '~/'*) echo "${HOME}/${1#~/}" ;;
+-        '~')   echo "${HOME}" ;;
+-        *)     echo "$1" ;;
+-    esac
+-}
+-
+-REPO="HalFrgrd/evp"
+-find_writable_path_dir() {
+-    (
+-        IFS=':'
+-        for dir in $PATH; do
+-            dir="${dir%/}"
+-            if [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ]; then
+-                case "$dir" in
+-                    /bin|/sbin|/usr/bin|/usr/sbin|/lib*|/opt|/usr/lib*)
+-                        continue
+-                        ;;
+-                    *)
+-                        echo "$dir"
+-                        exit 0
+-                        ;;
+-                esac
+-            fi
+-        done
+-        exit 1
+-    )
+-}
+-
+-is_in_path() {
+-    (
+-        IFS=':'
+-        for dir in $PATH; do
+-            dir_abs="$(cd "$dir" 2>/dev/null && pwd || true)"
+-            if [ -n "$dir_abs" ] && [ "$dir_abs" = "$1" ]; then
+-                exit 0
+-            fi
+-        done
+-        exit 1
+-    )
+-}
+-
+-if [ -n "${EVP_INSTALL_DIR:-}" ]; then
+-    INSTALL_DIR="$(expand_path "$EVP_INSTALL_DIR")"
+-else
+-    if W_DIR="$(find_writable_path_dir)"; then
+-        INSTALL_DIR="$W_DIR"
+-    else
+-        if [ -w "/usr/local/bin" ]; then
+-            INSTALL_DIR="/usr/local/bin"
+-        else
+-            INSTALL_DIR="${HOME}/.local/bin"
+-        fi
+-    fi
++REPO=victor-software-house/evp
++TAG=${EVP_VERSION:-evp-0.19.0-vsh.1}
++BIN=${EVP_INSTALL_DIR:-"$HOME/.local/bin"}
++case "$TAG" in *[!a-zA-Z0-9._-]*|'') printf '%s\n' 'Invalid EVP_VERSION' >&2; exit 1;; esac
++if [ "$(uname -s)-$(uname -m)" != Darwin-arm64 ]; then
++    printf '%s\n' 'This fork release supports Apple Silicon macOS only.' >&2
++    exit 1
+ fi
+-VERSION_OVERRIDE="${EVP_VERSION:-}"
+-
+-say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+-warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+-err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+-
+-download() {
+-    url="$1"; dest="$2"
+-    if command -v curl >/dev/null 2>&1; then
+-        curl -fsSL -o "$dest" "$url"
+-    elif command -v wget >/dev/null 2>&1; then
+-        wget -qO "$dest" "$url"
+-    else
+-        err "Neither curl nor wget is available."
+-    fi
+-}
+-
+-get_latest_version() {
+-    url="https://github.com/${REPO}/releases/latest"
+-    if command -v curl >/dev/null 2>&1; then
+-        tag_url="$(curl -sI "$url" | grep -i '^location:' | head -1)"
+-    elif command -v wget >/dev/null 2>&1; then
+-        tag_url="$(wget --max-redirect=0 --server-response -O /dev/null "$url" 2>&1 | grep -i 'location:' | head -1)"
+-    else
+-        err "Neither curl nor wget is available. Please install one and retry."
+-    fi
+-    version="$(printf '%s' "$tag_url" | sed 's|.*/||' | cut -d' ' -f1 | tr -d '\r\n')"
+-    [ -n "$version" ] || err "Could not determine latest version from GitHub Release redirect."
+-    echo "$version"
+-}
+-
+-verify_sha256() {
+-    sha256_file="$1"
+-    if command -v sha256sum >/dev/null 2>&1; then
+-        sha256sum -c "$sha256_file"
+-    elif command -v shasum >/dev/null 2>&1; then
+-        shasum -a 256 -c "$sha256_file"
+-    else
+-        err "No checksum tool found (sha256sum or shasum). Cannot verify download."
+-    fi
+-}
+-
+-# --- Platform detection ----------------------------------------------------
+-
+-OS="$(uname -s)"
+-ARCH="$(uname -m)"
+-
+-case "$OS" in
+-    Linux) os_tag="unknown-linux-musl" ;;
+-    Darwin) os_tag="apple-darwin" ;;
+-    FreeBSD) os_tag="unknown-freebsd" ;;
+-    *)
+-        err "Unsupported OS: $OS. Only Linux, macOS, and FreeBSD prebuilt binaries are published today.
+-Build from source instead: https://github.com/${REPO}#build-from-source"
+-        ;;
+-esac
+-
+-case "$ARCH" in
+-    x86_64|amd64) arch_tag="x86_64" ;;
+-    arm64|aarch64) arch_tag="aarch64" ;;
+-    *)
+-        err "Unsupported architecture: $ARCH. Only x86_64 and aarch64 prebuilt binaries are published today.
+-Build from source instead: https://github.com/${REPO}#build-from-source"
+-        ;;
+-esac
+-
+-# Validate supported combinations
+-case "${arch_tag}-${os_tag}" in
+-    x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-freebsd)
+-        ;;
+-    *)
+-        err "Unsupported target platform: ${arch_tag}-${os_tag}.
+-Build from source instead: https://github.com/${REPO}#build-from-source"
+-        ;;
+-esac
+-
+-TARGET="${arch_tag}-${os_tag}"
+-say "Detected target: ${TARGET}"
+-
+-# --- Resolve release tag ---------------------------------------------------
+-
+-if [ -n "$VERSION_OVERRIDE" ]; then
+-    TAG="$VERSION_OVERRIDE"
+-    say "Using specified release version: ${TAG}"
+-else
+-    say "Fetching latest release info from github.com/${REPO}..."
+-    TAG="$(get_latest_version)"
+-    say "Latest version: ${TAG}"
+-fi
+-
+-VERSION_NO_V="${TAG#v}"
+-STAGE="evp-${VERSION_NO_V}-${TARGET}"
+-ARCHIVE="${STAGE}.tar.gz"
+-URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE}"
+-SHA_URL="${URL}.sha256"
+-
+-
+-
+-# --- Download + verify -----------------------------------------------------
+-
+-TMPDIR="$(mktemp -d)"
+-# shellcheck disable=SC2064
+-trap "rm -rf '$TMPDIR'" EXIT
+-
+-say "Downloading ${ARCHIVE}..."
+-download "$URL" "${TMPDIR}/${ARCHIVE}"
+-
+-if download "$SHA_URL" "${TMPDIR}/${ARCHIVE}.sha256" 2>/dev/null; then
+-    say "Verifying checksum..."
+-    (cd "$TMPDIR" && verify_sha256 "${ARCHIVE}.sha256") \
+-        || err "Checksum verification failed."
+-else
+-    warn "No .sha256 published for ${TAG}; skipping verification."
+-fi
+-
+-# --- Extract + install -----------------------------------------------------
+-
+-tar -xzf "${TMPDIR}/${ARCHIVE}" -C "${TMPDIR}"
+-mkdir -p "$INSTALL_DIR"
+-install -m 755 "${TMPDIR}/${STAGE}/evp" "${INSTALL_DIR}/evp"
+-
+-ABS_INSTALL_DIR=$(cd "$INSTALL_DIR" && pwd)
+-ABS_PWD=$(pwd)
+-
+-if is_in_path "$ABS_INSTALL_DIR"; then
+-    RUN_CMD="evp"
+-elif [ "$ABS_INSTALL_DIR" = "$ABS_PWD" ]; then
+-    RUN_CMD="./evp"
+-else
+-    RUN_CMD="${INSTALL_DIR}/evp"
+-fi
+-
+-say "Installed: ${INSTALL_DIR}/evp"
+-"${INSTALL_DIR}/evp" --version | head -n1
+-
+-cat <<EOF
+-
+-Try it out:
+-
+-    ${RUN_CMD} print-ref-script > demo.tape && ${RUN_CMD} demo.tape
+-    # → writes ./evp-test.gif (a small built-in demo)
+-
+-Or record your own terminal session:
+-
+-    ${RUN_CMD} record --output demo.tape
+-
+-EOF
++for tool in curl tar shasum; do
++    command -v "$tool" >/dev/null 2>&1 || { printf 'Required tool missing: %s\n' "$tool" >&2; exit 1; }
++done
++ARCHIVE="$TAG-aarch64-apple-darwin.tar.gz"
++URL="https://github.com/$REPO/releases/download/$TAG"
++TEMP=$(mktemp -d)
++trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
++curl -fLsS "$URL/$ARCHIVE" -o "$TEMP/$ARCHIVE"
++curl -fLsS "$URL/$ARCHIVE.sha256" -o "$TEMP/$ARCHIVE.sha256"
++(cd "$TEMP" && shasum -a 256 -c "$ARCHIVE.sha256")
++ROOT="$TEMP/root"
++mkdir "$ROOT"
++tar -xzf "$TEMP/$ARCHIVE" -C "$ROOT"
++test -f "$ROOT/evp"
++test -f "$ROOT/skills/evp/SKILL.md"
++mkdir -p "$BIN"
++BIN=$(cd "$BIN" && pwd)
++SHARE="$BIN/../share/evp"
++mkdir -p "$SHARE"
++install -m 755 "$ROOT/evp" "$BIN/evp"
++cp "$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT/PATCHES.md" "$ROOT/ARCHITECTURE.md" "$ROOT/LICENSE" "$SHARE/"
++cp -R "$ROOT/skills" "$ROOT/examples" "$ROOT/licenses" "$SHARE/"
++"$BIN/evp" --version
++printf '\nBinary: %s/evp\nDocs and skill: %s\nAdd the binary directory to PATH if needed.\n' "$BIN" "$SHARE"
+diff --git a/skills/evp/SKILL.md b/skills/evp/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9ea77eab127513697ff8053453d427e0425c3b9
+--- /dev/null
++++ b/skills/evp/SKILL.md
+@@ -0,0 +1,88 @@
++---
++name: evp
++description: Create real terminal GIFs, animated SVGs and PNG screenshots with EVP. Use for terminal demos, CLI walkthroughs, TUI recordings, mouse-driven promotional captures, tape scripting and exported-animation verification.
++license: MIT
++compatibility: EVP on PATH; this fork publishes an Apple Silicon macOS binary. No build toolchain is required for capture.
++---
++
++# EVP terminal capture
++
++Use the installed binary, not a source build. `evp --help`, `evp record --help`
++and `evp themes` are the discovery commands. A `.tape` launches real programs;
++inspect it before execution. Do not record private paths, tokens or unrelated
++sessions. Use disposable homes, files and sessions for integration demos.
++
++## Capture workflow
++
++1. Define the actual interaction and visible completion condition.
++2. Fix terminal geometry and choose the requested theme. Inspect the user's
++   current theme when asked to match it rather than guessing a preset.
++3. Run a tape against the real application. Prefer `Wait+Screen@10s /ready/`
++   to startup sleeps. Use `Screenshot before.png` and `Screenshot after.png`.
++4. Inspect both frames and animation in a browser. Verify the action reached the
++   application; a moving pointer is not proof of a successful click.
++5. Deliver the GIF and still, with the source tape and exact recorder version.
++   Clearly label synthetic demo data; do not imply a fixture is real agent work.
++
++## Minimal tape
++
++```text
++Output demo.gif
++Output demo.svg
++Set Shell /bin/zsh -f
++Set Cols 80
++Set Rows 16
++Set FontSize 20
++Set Padding 24
++Set Framerate 50
++Set Theme "Catppuccin Mocha"
++Env PS1 "❯ "
++Sleep 500ms
++Type "printf 'Hello from EVP\\n'"
++Enter
++Sleep 1s
++Screenshot demo.png
++```
++
++Run `evp validate demo.tape`, then `evp demo.tape`. On macOS, open the GIF in a
++browser when the default viewer only shows still frames.
++
++## Mouse choreography
++
++Coordinates are zero-based cells. Derive the target from a captured frame or
++application geometry, not a guess. Use a short approach, pre-click hover, button
++press/release, post-release dwell, and deliberate withdrawal. Do not immediately
++fly away or leave the pointer covering the result.
++
++```text
++MouseMove@300ms@Linear 24 8 12 5
++Sleep 250ms
++Ctrl+Click@120ms 12 5
++Sleep 350ms
++MouseMove@450ms@Linear 12 5 24 8
++```
++
++`Click@120ms` is a 120 ms held press. Use Ctrl only when the target requires it.
++This fork compresses the arrow while pressed and adds neutral click feedback.
++Treat these durations as a starting point; inspect actual motion. Avoid long
++cinematic easing for ordinary clicks.
++
++For GIF, 50 fps gives an exact 20 ms cadence. Still frames can be coalesced;
++verify distinct movement frames and playback, not the average frame count over
++long holds. With ImageMagick installed, inspect delays using
++`magick identify -format '%T\n' demo.gif` (hundredths of a second).
++
++## Pitfalls
++
++- Omit font settings to use bundled fonts. `Set Font` is invalid in v0.19.0;
++  `FontFamily` expects a usable font file, not a reliably resolved family name.
++- `print-ref-script` includes a commented quickstart and upstream's test tape;
++  use the bundled `examples/quickstart.tape` for a minimal runnable start.
++- Preserve history and typed input. Never fake a prompt or send hidden Enter
++  merely to improve presentation. Fix ordering in the application if needed.
++- Test full-screen/alternate-buffer apps and modifier-click dispatch explicitly.
++- Build only when changing EVP itself, on the approved builder. Install and
++  capture do not require Rust, Zig, Bun, a browser engine or ffmpeg.
++
++The release archive also carries README.md, AGENTS.md and FORK.md for install,
++contributor and downstream-contract details.

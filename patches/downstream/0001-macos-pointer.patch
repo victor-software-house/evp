@@ -1,0 +1,322 @@
+macos-pointer
+
+From: Victor Araújo <victor@victor-software-house.com>
+
+Downstream-Reason: Draw an original macOS-style black arrow with a fine white outline from one geometry shared by GIF, PNG and SVG output, and show a press as a neutral 82% compression with a fixed hotspot instead of saturated circles.
+Upstream-Status: not-submitted
+Drop-When: Upstream evp draws a macOS-style pointer with press feedback from one geometry in every output format.
+---
+ src/lib.rs        |    1 +
+ src/pointer.rs    |  103 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/render_gif.rs |   81 ++++++++++++++++--------------------------
+ src/render_svg.rs |   23 +++++++++---
+ 4 files changed, 153 insertions(+), 55 deletions(-)
+ create mode 100644 src/pointer.rs
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 65aa21a99988e209398e3692367c98030636c97b..d5459cba115087e093a63970dc75347fed19c7ea 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -29,6 +29,7 @@
+ pub mod font;
+ pub mod full_recording;
+ pub mod keys;
++mod pointer;
+ pub mod pty;
+ pub mod record;
+ pub mod recording;
+diff --git a/src/pointer.rs b/src/pointer.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb5645b63e58a5470623f942be28507c847da2ce
+--- /dev/null
++++ b/src/pointer.rs
+@@ -0,0 +1,103 @@
++//! Shared macOS-style arrow geometry for raster and vector output.
++//! Original artwork: black body, fine white outline, no platform assets.
++const POINTS: [(f32, f32); 7] = [
++    (0.0, 0.0),
++    (0.0, 23.0),
++    (5.8, 17.5),
++    (10.3, 27.0),
++    (14.0, 25.2),
++    (9.5, 15.8),
++    (18.0, 15.8),
++];
++const OUTLINE: f32 = 0.75;
++pub(crate) const MIN: i32 = -1;
++pub(crate) const WIDTH: i32 = 21;
++pub(crate) const HEIGHT: i32 = 30;
++
++pub(crate) fn svg() -> String {
++    let points = POINTS
++        .iter()
++        .map(|(x, y)| format!("{x},{y}"))
++        .collect::<Vec<_>>()
++        .join(" ");
++    format!(
++        r##"<polygon points="{points}" fill="#111111" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>"##
++    )
++}
++
++fn sample(x: f32, y: f32) -> Option<f32> {
++    let mut inside = false;
++    let mut distance = f32::INFINITY;
++    for i in 0..POINTS.len() {
++        let (ax, ay) = POINTS[i];
++        let (bx, by) = POINTS[(i + 1) % POINTS.len()];
++        if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
++            inside = !inside;
++        }
++        let dx = bx - ax;
++        let dy = by - ay;
++        let t = (((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
++        distance = distance.min((x - ax - t * dx).hypot(y - ay - t * dy));
++    }
++    if distance <= OUTLINE {
++        Some(255.0)
++    } else if inside {
++        Some(17.0)
++    } else {
++        None
++    }
++}
++
++/// Four-by-four coverage sampling avoids the previous doubled bitmap's jagged edges.
++pub(crate) fn pixel(x: i32, y: i32) -> ([u8; 3], f32) {
++    scaled_pixel(x, y, 1.0)
++}
++
++pub(crate) fn scaled_pixel(x: i32, y: i32, scale: f32) -> ([u8; 3], f32) {
++    let mut count = 0;
++    let mut value = 0.0;
++    for sy in 0..4 {
++        for sx in 0..4 {
++            if let Some(v) = sample(
++                (x as f32 + (sx as f32 + 0.5) / 4.0) / scale,
++                (y as f32 + (sy as f32 + 0.5) / 4.0) / scale,
++            ) {
++                value += v;
++                count += 1;
++            }
++        }
++    }
++    if count == 0 {
++        return ([0; 3], 0.0);
++    }
++    (
++        [(value / count as f32).round() as u8; 3],
++        count as f32 / 16.0,
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn pressed_pointer_is_smaller() {
++        let coverage = |scale| {
++            (MIN..HEIGHT)
++                .flat_map(|y| (MIN..WIDTH).map(move |x| scaled_pixel(x, y, scale).1))
++                .sum::<f32>()
++        };
++        assert!(coverage(0.82) < coverage(1.0) * 0.75);
++    }
++
++    #[test]
++    fn pointer_has_dark_body_white_outline_and_transparent_exterior() {
++        assert_eq!(pixel(3, 10), ([17; 3], 1.0));
++        assert!(pixel(0, 10).0[0] > 150);
++        assert_eq!(pixel(20, 29).1, 0.0);
++        assert!((MIN..HEIGHT).any(|y| (MIN..WIDTH).any(|x| {
++            let a = pixel(x, y).1;
++            a > 0.0 && a < 1.0
++        })));
++        assert!(svg().contains("stroke-width=\"1.5\""));
++    }
++}
+diff --git a/src/render_gif.rs b/src/render_gif.rs
+index 47b956befb6ef6dfb5f51640b49e71004f396831..27e8e877bfd1f9a9093da6044ef737d2da5718ad 100644
+--- a/src/render_gif.rs
++++ b/src/render_gif.rs
+@@ -26,11 +26,8 @@ use crate::{
+ 
+ const TRANSPARENT_COLOR_INDEX: u8 = 255;
+ 
+-const MOUSE_POINTER_WIDTH: u32 = 12;
+-const MOUSE_POINTER_HEIGHT: u32 = 19;
+-
+-const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 16;
+-const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 32;
++const MOUSE_RIPPLE_CLICK_RADIUS: u32 = 12;
++const MOUSE_RIPPLE_DRAG_RADIUS: u32 = 12;
+ const MOUSE_RIPPLE_MAX_RADIUS: i32 = 48; // Bounding box padding for mouse updates
+ 
+ /// Cache key identifying a rasterised glyph outline.
+@@ -826,8 +823,8 @@ fn rasterize_raw_frame_idx(
+                     cx,
+                     cy,
+                     MOUSE_RIPPLE_CLICK_RADIUS,
+-                    [255, 0, 0],
+-                    0.5,
++                    [220, 220, 220],
++                    0.32,
+                     curr.default_bg,
+                 );
+             }
+@@ -841,43 +838,40 @@ fn rasterize_raw_frame_idx(
+                     cx,
+                     cy,
+                     MOUSE_RIPPLE_DRAG_RADIUS,
+-                    [237, 97, 215],
+-                    0.5,
++                    [220, 220, 220],
++                    0.18,
+                     curr.default_bg,
+                 );
+             }
+             MouseState::Moving => {}
+         }
+ 
+-        for dy in 0..MOUSE_POINTER_HEIGHT {
+-            for dx in 0..MOUSE_POINTER_WIDTH {
+-                let val = CURSOR_BITMAP[(dy * MOUSE_POINTER_WIDTH + dx) as usize];
+-                if val == 0 {
+-                    continue;
+-                }
+-                let color = if val == 1 { [255, 255, 255] } else { [0, 0, 0] };
+-                for sy in 0..2 {
+-                    for sx in 0..2 {
+-                        let px = cx + (dx as i32 * 2) + sx;
+-                        let py = cy + (dy as i32 * 2) + sy;
+-                        if px >= 0
+-                            && px < cfg.canvas_w as i32
+-                            && py >= 0
+-                            && py < cfg.canvas_h as i32
+-                        {
+-                            blend_pixel_idx(
+-                                buf,
+-                                prev_buf,
+-                                palette,
+-                                cfg.canvas_w,
+-                                px as u32,
+-                                py as u32,
+-                                color,
+-                                1.0,
+-                                curr.default_bg,
+-                            );
+-                        }
+-                    }
++        for dy in crate::pointer::MIN..crate::pointer::HEIGHT {
++            for dx in crate::pointer::MIN..crate::pointer::WIDTH {
++                let (color, alpha) = if m_state == MouseState::Clicking {
++                    crate::pointer::scaled_pixel(dx, dy, 0.82)
++                } else {
++                    crate::pointer::pixel(dx, dy)
++                };
++                let px = cx + dx;
++                let py = cy + dy;
++                if alpha > 0.0
++                    && px >= 0
++                    && py >= 0
++                    && px < cfg.canvas_w as i32
++                    && py < cfg.canvas_h as i32
++                {
++                    blend_pixel_idx(
++                        buf,
++                        prev_buf,
++                        palette,
++                        cfg.canvas_w,
++                        px as u32,
++                        py as u32,
++                        color,
++                        alpha,
++                        curr.default_bg,
++                    );
+                 }
+             }
+         }
+@@ -902,17 +896,6 @@ fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+     ]
+ }
+ 
+-const CURSOR_BITMAP: [u8; MOUSE_POINTER_WIDTH as usize * MOUSE_POINTER_HEIGHT as usize] = [
+-    2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 0,
+-    0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1,
+-    1, 2, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0,
+-    2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 2, 1, 1, 1, 1, 1, 2, 2,
+-    2, 2, 2, 0, 2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, 2, 1, 2, 0, 2, 1, 1, 2, 0, 0, 0, 0, 2, 2, 0, 0,
+-    2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0,
+-    0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-    0, 0, 0, 0,
+-];
+-
+ fn inside_rounded_rect(x: u32, y: u32, cfg: ViewportConfig, radius: i64) -> bool {
+     if radius == 0 {
+         return true;
+diff --git a/src/render_svg.rs b/src/render_svg.rs
+index 24943e9d4868c1ef5dfae19211a739948cb6e3b4..f2778fb902be4be4f75ea3b1c0defee0a79d7cd3 100644
+--- a/src/render_svg.rs
++++ b/src/render_svg.rs
+@@ -1887,7 +1887,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+             format!(" {}", click_attrs.join(" "))
+         };
+         format!(
+-            r##"<circle cx="0" cy="0" r="16" fill="#ff0000" fill-opacity="0.5"{}/>"##,
++            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.32"{}/>"##,
+             class_str
+         )
+     } else {
+@@ -1897,7 +1897,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+             format!(" {}", click_attrs.join(" "))
+         };
+         format!(
+-            r##"<circle cx="0" cy="0" r="16" fill="#ff0000" fill-opacity="0.5"{}>
++            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.32"{}>
+ {}
+ </circle>"##,
+             class_str,
+@@ -1929,7 +1929,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+             format!(" {}", drag_attrs.join(" "))
+         };
+         format!(
+-            r##"<circle cx="0" cy="0" r="16" fill="#ed61d7" fill-opacity="0.5"{}/>"##,
++            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.18"{}/>"##,
+             class_str
+         )
+     } else {
+@@ -1939,7 +1939,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+             format!(" {}", drag_attrs.join(" "))
+         };
+         format!(
+-            r##"<circle cx="0" cy="0" r="16" fill="#ed61d7" fill-opacity="0.5"{}>
++            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.18"{}>
+ {}
+ </circle>"##,
+             class_str,
+@@ -1957,13 +1957,24 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String
+         r#"<g {}>
+ {}{}
+   {}
+-  <path d="M0,0 L0,30 L8,22 L14,36 L18,34 L12,20 L20,20 Z" fill="white" stroke="black" stroke-width="2"/>
++  {}
+ </g>
+ "#,
+         g_attrs.join(" "),
+         anims_str,
+         click_inner,
+-        drag_inner
++        drag_inner,
++        format!(
++            r#"<g><animateTransform attributeName="transform" type="scale" calcMode="discrete" values="{}" keyTimes="{}" dur="{}" begin="t.begin" fill="freeze"/>{}</g>"#,
++            vals_click_vis
++                .iter()
++                .map(|v| if v == "visible" { "0.82" } else { "1" })
++                .collect::<Vec<_>>()
++                .join(";"),
++            format_key_time_list(&kt_click_vis),
++            dur,
++            crate::pointer::svg(),
++        )
+     )
+ }
+ 
