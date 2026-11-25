@@ -1887,7 +1887,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             format!(" {}", click_attrs.join(" "))
         };
         format!(
-            r##"<circle cx="0" cy="0" r="16" fill="#ff0000" fill-opacity="0.5"{}/>"##,
+            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.32"{}/>"##,
             class_str
         )
     } else {
@@ -1897,7 +1897,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             format!(" {}", click_attrs.join(" "))
         };
         format!(
-            r##"<circle cx="0" cy="0" r="16" fill="#ff0000" fill-opacity="0.5"{}>
+            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.32"{}>
 {}
 </circle>"##,
             class_str,
@@ -1929,7 +1929,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             format!(" {}", drag_attrs.join(" "))
         };
         format!(
-            r##"<circle cx="0" cy="0" r="16" fill="#ed61d7" fill-opacity="0.5"{}/>"##,
+            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.18"{}/>"##,
             class_str
         )
     } else {
@@ -1939,7 +1939,7 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             format!(" {}", drag_attrs.join(" "))
         };
         format!(
-            r##"<circle cx="0" cy="0" r="16" fill="#ed61d7" fill-opacity="0.5"{}>
+            r##"<circle cx="0" cy="0" r="12" fill="#dcdcdc" fill-opacity="0.18"{}>
 {}
 </circle>"##,
             class_str,
@@ -1957,13 +1957,24 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
         r#"<g {}>
 {}{}
   {}
-  <path d="M0,0 L0,30 L8,22 L14,36 L18,34 L12,20 L20,20 Z" fill="white" stroke="black" stroke-width="2"/>
+  {}
 </g>
 "#,
         g_attrs.join(" "),
         anims_str,
         click_inner,
-        drag_inner
+        drag_inner,
+        format!(
+            r#"<g><animateTransform attributeName="transform" type="scale" calcMode="discrete" values="{}" keyTimes="{}" dur="{}" begin="t.begin" fill="freeze"/>{}</g>"#,
+            vals_click_vis
+                .iter()
+                .map(|v| if v == "visible" { "0.82" } else { "1" })
+                .collect::<Vec<_>>()
+                .join(";"),
+            format_key_time_list(&kt_click_vis),
+            dur,
+            crate::pointer::svg(),
+        )
     )
 }
 
