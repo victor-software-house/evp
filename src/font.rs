@@ -242,6 +242,37 @@ impl FontInfo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_custom_font_keeps_the_embedded_fallbacks() {
+        use ab_glyph::Font;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/NotoSansMonoCJKjp-Subset.otf"
+        );
+        let set = super::load_font_family(Some(path)).unwrap().font_set;
+        assert_eq!(set.regular[0], 0);
+        assert!(set.regular.len() > 1);
+        let (idx, font) = set.select_for_char(0, '✔');
+        assert_ne!(idx, 0);
+        assert_ne!(font.glyph_id('✔').0, 0);
+    }
+
+    #[test]
+    fn a_narrow_symbol_takes_a_text_face_before_the_emoji_face() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/NotoSansMonoCJKjp-Subset.otf"
+        );
+        let set = super::load_font_family(Some(path)).unwrap().font_set;
+        let family = |ch| &set.fonts[set.select_for_char(0, ch).0].family_name;
+        assert_eq!(family('🚀'), super::EMOJI_FAMILY);
+        let text_face = set.regular.iter().any(|i| {
+            set.fonts[*i].family_name != super::EMOJI_FAMILY
+                && super::has_glyph(set.fonts[*i].get_font(), '⏺')
+        });
+        assert_eq!(family('⏺') != super::EMOJI_FAMILY, text_face);
+    }
+
     use super::{FontInfo, SvgFontEmbeddingPolicy};
 
     #[test]
@@ -311,11 +342,24 @@ impl FontSet {
     /// Select the best `(font_index, &FontArc)` for `ch` given cell style flags.
     pub fn select_for_char(&self, flags: u8, ch: char) -> (usize, &FontArc) {
         let indices = self.indices_for_flags(flags);
+        // A one-cell character shows as text, as a terminal draws it: the
+        // emoji face draws it only when no text face after it has it, so
+        // U+23FA is a circle rather than its emoji button.
+        let text = unicode_width::UnicodeWidthChar::width(ch) == Some(1);
+        let mut emoji = None;
         for &idx in indices {
             let font = self.fonts[idx].get_font();
-            if has_glyph(font, ch) {
-                return (idx, font);
+            if !has_glyph(font, ch) {
+                continue;
             }
+            if text && self.fonts[idx].family_name == EMOJI_FAMILY {
+                emoji.get_or_insert((idx, font));
+                continue;
+            }
+            return (idx, font);
+        }
+        if let Some(found) = emoji {
+            return found;
         }
         let idx = indices[0];
         (idx, self.fonts[idx].get_font())
@@ -347,35 +391,136 @@ pub fn extract_family_name(ttf_bytes: &[u8], fallback: &str) -> String {
     fallback.to_string()
 }
 
-/// Load the requested font set. If `path` is provided, it is loaded as a custom font.
-/// Otherwise, the embedded JetBrains Mono family is loaded along with default fallbacks.
+/// The family a face belongs to, preferring the typographic family (name 16),
+/// which every weight of a family shares, over the legacy family (name 1).
+fn typographic_family(ttf_bytes: &[u8]) -> Option<String> {
+    let face = ttf_parser::Face::parse(ttf_bytes, 0).ok()?;
+    let named = |id| {
+        face.names()
+            .into_iter()
+            .find(|n| n.name_id == id)
+            .and_then(|n| n.to_string())
+    };
+    named(16).or_else(|| named(1))
+}
+
+fn custom_face(bytes: Vec<u8>, family_name: &str, weight: &str) -> Result<FontInfo> {
+    let face = FontArc::try_from_vec(bytes.clone()).context("invalid font file")?;
+    Ok(FontInfo {
+        font: OnceLock::from(face),
+        source: FontSource::Custom { bytes },
+        woff2_bytes: None,
+        family_name: family_name.to_string(),
+        weight: weight.to_string(),
+        style: "normal".to_string(),
+        is_custom: true,
+    })
+}
+
+/// The system fonts a macOS terminal falls back to for symbols its font
+/// lacks, such as Menlo's flag (U+2691) or STIX Two Math's record circle
+/// (U+23FA), in the order they are tried.
+const SYSTEM_FALLBACK_FAMILIES: &[&str] = &["Menlo", "Apple Symbols", "STIX Two Math"];
+
+/// The embedded emoji face, which draws a symbol as its emoji.
+const EMOJI_FAMILY: &str = "Noto Emoji";
+
+/// The faces of `SYSTEM_FALLBACK_FAMILIES` installed on this machine. They
+/// come after the embedded fallbacks, so output is the same wherever the
+/// embedded fonts cover a character.
+fn system_fallbacks() -> Vec<FontInfo> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    SYSTEM_FALLBACK_FAMILIES
+        .iter()
+        .filter_map(|family| {
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..Default::default()
+            };
+            let id = db.query(&query)?;
+            let (bytes, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
+            // Only the first face of a collection is read; FontArc parses index 0.
+            (index == 0)
+                .then(|| custom_face(bytes, family, "normal").ok())
+                .flatten()
+        })
+        .collect()
+}
+
+/// The upright bold face of `family` in the folder of `path`, found the way a
+/// terminal finds the bold face of its configured font.
+fn sibling_bold(path: &std::path::Path, family: &str) -> Option<Vec<u8>> {
+    let mut entries: Vec<_> = std::fs::read_dir(path.parent()?)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    entries.into_iter().filter(|p| p != path).find_map(|p| {
+        let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "ttf" | "otf") {
+            return None;
+        }
+        let bytes = std::fs::read(&p).ok()?;
+        let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+        let bold = face.weight().to_number() == 700 && !face.is_italic();
+        (bold && typographic_family(&bytes).as_deref() == Some(family)).then_some(bytes)
+    })
+}
+
+/// Load the requested font set. If `path` is provided, that face is the primary
+/// font, with the bold face of its family from the same folder when there is one;
+/// the embedded fallbacks still cover the characters it lacks, as a terminal's
+/// fallback fonts do. Otherwise, the embedded JetBrains Mono family is loaded
+/// along with default fallbacks.
 pub fn load_font_family(path: Option<&str>) -> Result<LoadedFontFamily> {
     if let Some(p) = path {
         let bytes = std::fs::read(p).with_context(|| format!("reading font {p}"))?;
-        let face = FontArc::try_from_vec(bytes.clone()).context("invalid font file")?;
         let family_name = extract_family_name(&bytes, "CustomFont");
+        let typographic = typographic_family(&bytes);
+        let bold_bytes = typographic
+            .as_deref()
+            .and_then(|family| sibling_bold(std::path::Path::new(p), family));
 
-        let info = FontInfo {
-            font: OnceLock::from(face),
-            source: FontSource::Custom { bytes },
-            woff2_bytes: None,
-            family_name,
-            weight: "normal".to_string(),
-            style: "normal".to_string(),
-            is_custom: true,
+        let mut fonts = vec![custom_face(bytes, &family_name, "normal")?];
+        let bold_idx = match bold_bytes {
+            Some(b) => {
+                fonts.push(custom_face(b, &family_name, "bold")?);
+                fonts.len() - 1
+            }
+            None => 0,
+        };
+
+        let default = load_font_family(None)?.font_set;
+        let offset = fonts.len();
+        fonts.extend(default.fonts.iter().cloned());
+        let system_start = fonts.len();
+        fonts.extend(system_fallbacks());
+        let system: Vec<usize> = (system_start..fonts.len()).collect();
+        let chain = |first: usize, list: &[usize]| -> Vec<usize> {
+            std::iter::once(first)
+                .chain(list.iter().skip(1).map(|i| i + offset))
+                .chain(system.iter().copied())
+                .collect()
         };
 
         let font_set = FontSet {
-            fonts: vec![info],
-            regular: vec![0],
-            bold: vec![0],
-            italic: vec![0],
-            bold_italic: vec![0],
+            regular: chain(0, &default.regular),
+            bold: chain(bold_idx, &default.bold),
+            italic: chain(0, &default.italic),
+            bold_italic: chain(bold_idx, &default.bold_italic),
+            fonts,
         };
 
+        let description = if bold_idx == 0 {
+            format!("explicit path: {p} + embedded fallbacks")
+        } else {
+            format!("explicit path: {p} with its bold face + embedded fallbacks")
+        };
         return Ok(LoadedFontFamily {
             font_set,
-            description: format!("explicit path: {p}"),
+            description,
         });
     }
 

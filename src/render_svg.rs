@@ -1770,7 +1770,8 @@ fn serialize_cursor_rects(cursors: &[CursorRect], total_ms: u32) -> String {
     s
 }
 
-fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String {
+fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32, font_size: f32) -> String {
+    let base = crate::pointer::scale_for_font(font_size);
     if mouse_spans.is_empty() {
         return String::new();
     }
@@ -1968,7 +1969,11 @@ fn serialize_mouse_elements(mouse_spans: &[MouseSpan], total_ms: u32) -> String 
             r#"<g><animateTransform attributeName="transform" type="scale" calcMode="discrete" values="{}" keyTimes="{}" dur="{}" begin="t.begin" fill="freeze"/>{}</g>"#,
             vals_click_vis
                 .iter()
-                .map(|v| if v == "visible" { "0.82" } else { "1" })
+                .map(|v| if v == "visible" {
+                    format!("{}", base * 0.82)
+                } else {
+                    format!("{base}")
+                })
                 .collect::<Vec<_>>()
                 .join(";"),
             format_key_time_list(&kt_click_vis),
@@ -2028,7 +2033,8 @@ impl SvgDoc {
         extra_css.push_str(".u { text-decoration: underline; }\n");
         extra_css.push_str(".s { text-decoration: line-through; }\n");
         extra_css.push_str(".us { text-decoration: underline line-through; }\n");
-        extra_css.push_str("text, tspan { font-kerning: none; font-variant-ligatures: none; text-rendering: geometricPrecision; }\n");
+        // Browsers collapse spaces despite xml:space, which shifts every per-character x after them.
+        extra_css.push_str("text, tspan { white-space: pre; font-kerning: none; font-variant-ligatures: none; text-rendering: geometricPrecision; }\n");
         let letter_spacing_style = if self.letter_spacing != 0.0 {
             format!(
                 "letter-spacing: {}px; ",
@@ -2249,7 +2255,11 @@ impl SvgDoc {
         s.push_str(&serialize_cursor_rects(&self.cursor_rects, total_ms));
 
         // Mouse elements
-        s.push_str(&serialize_mouse_elements(&self.mouse_spans, total_ms));
+        s.push_str(&serialize_mouse_elements(
+            &self.mouse_spans,
+            total_ms,
+            self.font_size,
+        ));
 
         s.push_str("\n</svg>\n");
         s
@@ -3019,6 +3029,7 @@ fn render_from_frames(
         });
     }
 
+    let fallback_fonts = load_font_family(opts.font_path.as_deref())?.font_set;
     let mut text_elements = Vec::new();
     for span in &cell_spans {
         if span.start_ms == span.end_ms {
@@ -3030,12 +3041,25 @@ fn render_from_frames(
         let x = cfg.content_x + span.col as u32 * cell_w;
         let y = cfg.content_y + span.row as u32 * cell_h + baseline;
 
-        let is_box = span.visual.text.chars().any(is_box_drawing);
+        let has_box = span.visual.text.chars().any(is_box_drawing);
+        // A fallback glyph wider than its cells is squeezed into them, as a
+        // terminal keeps every glyph inside its cell; the box path's
+        // textLength does that.
+        let is_box = has_box
+            || span.visual.text.chars().any(|c| {
+                overflows_cell(
+                    &fallback_fonts,
+                    span.visual.flags,
+                    c,
+                    opts.font_size,
+                    cell_w,
+                )
+            });
         let mut scale_y = 1.0;
         let mut cell_center_y_offset = 0.0;
         let mut char_center_y_offset = 0.0;
 
-        if is_box {
+        if has_box {
             let scale_font = opts.font_size / cfg.font_size_px;
             let char_h_svg = cfg.char_height_px as f32 * scale_font;
             let ascent_svg = cfg.ascent_px as f32 * scale_font;
@@ -3310,6 +3334,29 @@ fn dim_color(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
 }
 
 /// Escape a string for use as an XML attribute value.
+/// Whether `c` comes from a fallback font and is wider than the cells it takes.
+fn overflows_cell(
+    fonts: &crate::font::FontSet,
+    flags: u8,
+    c: char,
+    font_size: f32,
+    cell_w: u32,
+) -> bool {
+    use ab_glyph::{Font, ScaleFont};
+    let (idx, font) = fonts.select_for_char(flags, c);
+    if fonts.indices_for_flags(flags).first() == Some(&idx) {
+        return false;
+    }
+    let scale = font
+        .pt_to_px_scale(font_size)
+        .unwrap_or(ab_glyph::PxScale::from(font_size));
+    let advance = font.as_scaled(scale).h_advance(font.glyph_id(c));
+    let cells = unicode_width::UnicodeWidthChar::width(c)
+        .unwrap_or(1)
+        .max(1);
+    advance > (cell_w as usize * cells) as f32 + 0.5
+}
+
 fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -3437,6 +3484,24 @@ mod tests {
 
         std::fs::remove_file(svg_path).ok();
         std::fs::remove_file(svgz_path).ok();
+    }
+
+    #[test]
+    fn spaces_keep_their_cells_and_wide_fallback_glyphs_fit_theirs() {
+        let mut rec = synth_recording();
+        if let Frame::Key { cells, .. } = &mut rec.frames[0] {
+            cells[2] = CellSnap {
+                text: "✔".into(),
+                fg: [255, 255, 255],
+                bg: [0, 0, 0],
+                flags: 0,
+            };
+        }
+        let svg = render_svg_to_string(&rec, &SvgOptions::default()).unwrap();
+        assert!(svg.contains("white-space: pre;"));
+        let check = svg.find(">✔<").or_else(|| svg.find("✔")).unwrap();
+        let text_open = svg[..check].rfind("<text").unwrap();
+        assert!(svg[text_open..check].contains("lengthAdjust=\"spacingAndGlyphs\""));
     }
 
     #[test]
