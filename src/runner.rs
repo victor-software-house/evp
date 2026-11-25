@@ -172,12 +172,6 @@ pub struct MouseSegment {
     pub easing: Option<crate::hand::MouseEasing>,
 }
 
-/// How long before a click's press reaches the program the drawn pointer
-/// shows it pressed. A frame shows the terminal as the program drew it a
-/// little after the frame's time, so a press drawn at the event's own time
-/// shows after the change it causes.
-const PRESS_LEAD: Duration = Duration::from_millis(40);
-
 pub(crate) fn resolve_mouse_position(
     recorded_at: Duration,
     segments: &[MouseSegment],
@@ -186,12 +180,9 @@ pub(crate) fn resolve_mouse_position(
         return None;
     }
 
-    // A press starts before the segment that leads to it ends, so the
-    // segment that started last wins.
     let active = segments
         .iter()
-        .filter(|s| s.start_time <= recorded_at && recorded_at <= s.end_time)
-        .max_by_key(|s| s.start_time);
+        .find(|s| s.start_time <= recorded_at && recorded_at <= s.end_time);
     if let Some(s) = active {
         let duration = s.end_time.saturating_sub(s.start_time);
         if duration == Duration::ZERO {
@@ -762,7 +753,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor.saturating_sub(PRESS_LEAD),
+                    start_time: cursor.saturating_sub(settings.click_lead),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
@@ -803,7 +794,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor.saturating_sub(PRESS_LEAD),
+                    start_time: cursor.saturating_sub(settings.click_lead),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
@@ -844,7 +835,7 @@ pub(crate) fn build_timeline(
             } => {
                 let per = scale(*delay);
                 mouse_segments.push(MouseSegment {
-                    start_time: cursor.saturating_sub(PRESS_LEAD),
+                    start_time: cursor.saturating_sub(settings.click_lead),
                     end_time: cursor + per,
                     start_col: *col as f32,
                     start_row: *row as f32,
